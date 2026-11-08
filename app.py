@@ -26,6 +26,7 @@ import limits
 import llm
 import reasoning
 import store
+import titles
 import usage as usagelog
 import wiki
 
@@ -457,6 +458,18 @@ async def rename_conversation(cid: str, request: Request):
     if not store.rename(cid, body.get("title", "")):
         raise HTTPException(404, "no such conversation")
     return {"ok": True}
+
+
+@app.post("/api/conversations/{cid}/title")
+async def title_conversation(cid: str, request: Request):
+    """Name a chat from its first exchange. A name someone typed by hand is left alone."""
+    user = auth.require(request)
+    raw = await request.body()
+    body = json.loads(raw) if raw else {}
+    row = store.get(cid)
+    if row is None:
+        raise HTTPException(404, "no such conversation")
+    return await titles.generate(user, cid, body.get("model") or row.get("model") or config.MODEL)
 
 
 @app.delete("/api/conversations/{cid}")

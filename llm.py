@@ -135,6 +135,26 @@ async def list_models() -> list[dict]:
         return r.json().get("data", [])
 
 
+async def complete(messages: list[dict], model: str, temperature: float,
+                   max_tokens: int | None = None, extra_body: dict | None = None) -> dict:
+    """One completion, not streamed. Returns the text and whatever usage the server reported."""
+    payload = {"model": model, "messages": messages}
+    if temperature is not None:
+        payload["temperature"] = temperature
+    if max_tokens:
+        payload["max_tokens"] = max_tokens
+    for key, value in (extra_body or {}).items():
+        payload[key] = value
+
+    async with client() as c:
+        r = await c.post("/chat/completions", json=payload)
+        r.raise_for_status()
+        body = r.json()
+
+    choice = (body.get("choices") or [{}])[0]
+    return {"text": (choice.get("message") or {}).get("content") or "", "usage": body.get("usage") or {}}
+
+
 async def stream_chat(messages: list[dict], model: str, temperature: float,
                      tools: list[dict] | None = None, max_tokens: int | None = None,
                      extra_body: dict | None = None) -> AsyncIterator[dict]:
