@@ -9,6 +9,7 @@ const DEFAULTS = {
   autoExpandThinking: false,
   reasoningEffort: "medium",
   wikiIndex: true,
+  webSearch: true,          // the default for a new conversation, when a provider is configured
   generateTitles: true,
   sidebarCollapsed: false,
 };

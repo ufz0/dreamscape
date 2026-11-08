@@ -3,5 +3,9 @@ uvicorn>=0.30
 httpx>=0.27
 argon2-cffi>=25.1
 
+# Web search. `ddgs` is the current name of the package (duckduckgo-search was renamed to it);
+# it is only imported when the duckduckgo provider is used.
+ddgs>=9.16.1,<10
+
 # Only needed for the tests (tests/). run.sh installs everything in this file.
 pytest>=8

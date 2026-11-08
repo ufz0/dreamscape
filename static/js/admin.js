@@ -13,6 +13,7 @@ const ui = {
   prevPeriod: el("prev-period"), nextPeriod: el("next-period"), currentPeriod: el("this-period"),
   totals: el("totals"), usageHead: el("usage-head"), usageRows: el("usage-rows"), filter: el("user-filter"),
   stacked: el("stacked"), export: el("export-csv"), chart: el("chart"), legend: el("chart-legend"), caption: el("chart-caption"),
+  provider: el("search-provider"),
 };
 
 const PERIODS = [{ key: "day", label: "Day" }, { key: "month", label: "Month" }, { key: "year", label: "Year" }, { key: "all", label: "All time" }];
@@ -50,6 +51,18 @@ async function loadUsers() {
   ui.setting.checked = Boolean(accounts.settings.allow_self_registration);
   renderUsers();
   renderAudit();
+}
+
+// Read-only: which provider the app is actually using. Nothing here changes .env.
+async function loadProvider() {
+  try {
+    const status = await api("/api/web");
+    ui.provider.textContent = status.configured
+      ? `${status.provider} — ${status.rate_limit} searches per ${status.rate_limit_minutes} min, cached ${status.cache_minutes} min`
+      : "not configured";
+  } catch (error) {
+    ui.provider.textContent = "not configured";
+  }
 }
 
 async function loadUsage() {
@@ -579,4 +592,5 @@ buildUsageHead();
 startShell({}).then(() => {
   loadUsers();
   loadUsage();
+  loadProvider();
 });

@@ -28,6 +28,7 @@ import reasoning
 import store
 import titles
 import usage as usagelog
+import websearch
 import wiki
 
 app = FastAPI(title="dreamscape")
@@ -54,13 +55,16 @@ async def csrf_check(request: Request, call_next):
     return await call_next(request)
 
 
-def system_prompt(system: str, inject_index: bool = True, effort_line: str = "") -> str:
+def system_prompt(system: str, inject_index: bool = True, effort_line: str = "", web: bool = False) -> str:
     if inject_index:
         index = wiki.index_text()
     else:
         index = "(wiki index not injected for this conversation)"
     base = config.read_prompt("system.md", date=datetime.now(timezone.utc).strftime("%Y-%m-%d"),
                              index=index, system=system or "(none)")
+    # Only when the web tools are actually offered to this conversation.
+    if web:
+        base = f"{base}\n\n{config.read_prompt('web_tools.md')}"
     return f"{base}\n\n{effort_line}" if effort_line else base
 
 
@@ -436,6 +440,13 @@ async def models(request: Request):
     return {"models": [row.get("id") for row in rows], "default": config.MODEL}
 
 
+@app.get("/api/web")
+def web_status(request: Request):
+    """Which search provider is active. The tools popup and the Settings page read this."""
+    auth.require(request)
+    return websearch.provider_status()
+
+
 @app.get("/api/conversations")
 def conversations(request: Request):
     auth.require(request)
@@ -499,8 +510,9 @@ async def stop_generation(request: Request):
 
 async def chat_stream(user: dict, cid: str, message: str, model: str, system: str, temperature: float,
                      inject_index: bool = True, regenerate: bool = False,
-                     effort: str = "medium"):
+                     effort: str = "medium", web: bool = False):
     mapping = reasoning.resolve(model, effort)
+    tools = agent.TOOLS + agent.WEB_TOOLS if web else agent.TOOLS
 
     def record(block: dict, estimated: bool) -> None:
         with db.transaction() as conn:
@@ -512,27 +524,35 @@ async def chat_stream(user: dict, cid: str, message: str, model: str, system: st
 
     if not regenerate:
         store.append(cid, {"role": "user", "content": message})
-    messages = [{"role": "system", "content": system_prompt(system, inject_index, mapping["system"])}] + store.messages(cid)
+    messages = [{"role": "system", "content": system_prompt(system, inject_index, mapping["system"], web)}] + store.messages(cid)
 
     content = ""
     reasoning_text = ""
     started = time.monotonic()
 
-    def save(partial: bool = False) -> None:
+    def save(partial: bool = False, tool_calls: list | None = None, note: str | None = None) -> None:
         record_entry = {"role": "assistant", "content": content or None}
         if reasoning_text:
             record_entry["reasoning"] = reasoning_text
             record_entry["reasoning_ms"] = int((time.monotonic() - started) * 1000)
         # The level used for this turn, kept for later analysis. Not sent back to the model.
         record_entry["reasoning_effort"] = mapping["level"]
+        # The tool calls of this step, so the transcript shows what the model actually asked for.
+        if tool_calls:
+            record_entry["tool_calls"] = tool_calls
+        # Only the note for a missing answer, and only on the final step. An intermediate step with
+        # thinking and a tool call has no answer text by design, so nothing is written for it.
+        if note:
+            record_entry["note"] = note
         if partial:
             record_entry["stopped"] = True
-        if content or reasoning_text:
+        if content or reasoning_text or tool_calls:
             store.append(cid, record_entry)
 
     try:
         async for event in agent.run_loop(messages, model, temperature, mapping=mapping,
-                                         on_usage=record, limit_check=blocked):
+                                         on_usage=record, limit_check=blocked,
+                                         tools=tools, user_id=user["id"]):
             if cid in STOP:
                 save(partial=True)
                 yield sse({"type": "stopped"})
@@ -542,10 +562,11 @@ async def chat_stream(user: dict, cid: str, message: str, model: str, system: st
             elif event["type"] == "assistant_message":
                 content = event["content"]
                 reasoning_text = event["reasoning"]
-                save()
+                save(tool_calls=event["tool_calls"], note=event.get("note"))
                 yield sse({"type": "assistant_message", "content": content, "reasoning": reasoning_text,
                            "reasoning_ms": event["reasoning_ms"], "reasoning_only": event["reasoning_only"],
-                           "reasoning_effort": mapping["level"], "tool_calls": event["tool_calls"]})
+                           "note": event.get("note"), "reasoning_effort": mapping["level"],
+                           "tool_calls": event["tool_calls"]})
             elif event["type"] == "tool":
                 store.append(cid, {"role": "tool", "tool_call_id": event.get("id"), "name": event["name"],
                                    "arguments": event["arguments"],
@@ -577,7 +598,8 @@ async def chat(request: Request):
         chat_stream(user, cid, body.get("message", ""), body.get("model") or config.MODEL,
                     body.get("system") or "", float(body.get("temperature", 0.7)),
                     bool(body.get("wiki_index", True)), bool(body.get("regenerate")),
-                    body.get("reasoning_effort") or reasoning.settings().get("default_level", "medium")),
+                    body.get("reasoning_effort") or reasoning.settings().get("default_level", "medium"),
+                    bool(body.get("web_search"))),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )

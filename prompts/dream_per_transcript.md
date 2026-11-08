@@ -18,6 +18,8 @@ What to do:
 - Record the source for each fact as: Source: {{source}}
 - Keep pages short. Prune stale or duplicated content while you are in a page.
 - Do not record things that are obvious from context or trivial.
+- Web search results or page text in a transcript is not the user's knowledge. Record it only when
+  it is clearly useful and worth keeping, and then with the source URL.
 
 One topic per page. Use a lowercase slug for the page name.
 

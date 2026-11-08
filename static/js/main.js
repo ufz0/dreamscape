@@ -7,6 +7,7 @@ import { settings, startShell, renderList, setActiveChat, currentModel, loadMode
   controlRow, numberInput, textArea, checkbox } from "./shell.js";
 import { save } from "./settings.js";
 import { effortFor, openEffort, paintEffort, remember, clearPending } from "./effort.js";
+import { providerStatus, webToolsFor, rememberWeb, clearPending as clearWebPending } from "./webtools.js";
 import { account, mustChange } from "./account.js";
 
 const el = (id) => document.getElementById(id);
@@ -72,6 +73,7 @@ function showConversation(hasMessages) {
 function newChat() {
   chatId = null;
   clearPending();
+  clearWebPending();
   setActiveChat(null);
   view.clear();
   ui.title.textContent = "New chat";
@@ -216,6 +218,7 @@ async function send(text, regenerate = false) {
   if (limitUntil || mustChange()) return;
 
   const level = effortFor(chatId);
+  const web = webToolsFor(chatId);
   const firstTurn = !chatId;
   if (!chatId) {
     const created = await api("/api/conversations", {
@@ -228,6 +231,7 @@ async function send(text, regenerate = false) {
     history.replaceState(null, "", `?c=${encodeURIComponent(chatId)}`);
   }
   remember(chatId, level);
+  rememberWeb(chatId, web);
 
   if (regenerate) view.removeLastMessage();
   else view.addUser(text, { showActions: true });
@@ -251,7 +255,7 @@ async function send(text, regenerate = false) {
     await streamChat({
       conversation_id: chatId, message: text, model: currentModel(), system: settings.system,
       temperature: settings.temperature, wiki_index: settings.wikiIndex, regenerate,
-      reasoning_effort: level,
+      reasoning_effort: level, web_search: web,
     }, (event) => view.handle(event), controller.signal);
     answered = true;
   } catch (error) {
@@ -303,7 +307,8 @@ function stopGeneration() {
 // ---------- composer popups ----------
 
 ui.options.addEventListener("click", () => {
-  openPanel(ui.options, (panel) => {
+  openPanel(ui.options, async (panel) => {
+    const provider = await providerStatus();
     panel.append(
       controlRow("Temperature", numberInput(settings.temperature, (value) => {
         settings.temperature = value;
@@ -317,9 +322,35 @@ ui.options.addEventListener("click", () => {
         settings.wikiIndex = value;
         save(settings);
       })),
+      webRow(provider),
     );
   });
 });
+
+// The web tools are remembered per conversation, like the reasoning level.
+function webRow(provider) {
+  const row = controlRow("Web search", checkbox(webToolsFor(chatId), (value) => {
+    rememberWeb(chatId, value);
+    settings.webSearch = value;
+    save(settings);
+  }));
+  const input = row.querySelector("input");
+  if (!provider.configured) {
+    input.disabled = true;
+    row.title = "No search provider is configured. Set SEARCH_PROVIDER, or BRAVE_API_KEY for Brave.";
+    const hint = document.createElement("span");
+    hint.className = "muted";
+    hint.textContent = "not configured";
+    row.append(hint);
+  } else {
+    const hint = document.createElement("span");
+    hint.className = "muted";
+    hint.textContent = provider.provider;
+    row.append(hint);
+    row.title = `Search provider: ${provider.provider}. Cached for ${provider.cache_minutes} minutes, ${provider.rate_limit} searches per ${provider.rate_limit_minutes} minutes.`;
+  }
+  return row;
+}
 
 ui.modelBtn.addEventListener("click", async () => {
   const models = await loadModels();

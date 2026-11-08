@@ -433,6 +433,14 @@ pre.code code { display: block; padding: 12px; font-family: var(--mono); font-si
 .tool-body { display: none; padding: 0 12px 10px; font-family: var(--mono); font-size: 12px; color: var(--muted); white-space: pre-wrap; word-break: break-word; }
 .tool.open .tool-body { display: block; }
 .tool-body .section { margin: 4px 0; }
+/* A web result is a list of things found, not a blob of JSON: title, source, snippet. */
+.tool-body .results { display: flex; flex-direction: column; gap: 7px; }
+.tool-body .result-row { display: block; }
+.tool-body .result-row a { color: var(--text); font-size: 13px; text-decoration: none; }
+.tool-body .result-row a:hover { text-decoration: underline; }
+.tool-body .result-row .domain { font-size: 12px; color: var(--muted); }
+.tool-body .result-row .snippet { font-size: 12.5px; color: var(--muted); margin-top: 2px; }
+.tool-body .page-text { font-family: var(--serif); font-size: 13px; color: var(--text); white-space: pre-wrap; }
 .tool.running .tool-head svg { animation: pulse 1.2s ease-in-out infinite; }
 .tool.running .tool-head svg:first-child { animation: spin 1.2s linear infinite; transform-origin: 50% 50%; }
 
@@ -458,6 +466,19 @@ pre.code code { display: block; padding: 12px; font-family: var(--mono); font-si
 }
 .thinking.open .body { display: block; }
 .note { font-size: 13px; color: var(--muted); font-style: italic; }
+
+/* The pages a turn used, as small chips under the answer. No favicons: domain and title only. */
+.sources { display: flex; flex-wrap: wrap; gap: 6px; margin: 10px 0 2px; }
+.sources .chip {
+  display: inline-flex; align-items: center; gap: 6px;
+  border: 1px solid var(--border); border-radius: 999px;
+  padding: 4px 10px; font-size: 12.5px; color: var(--muted);
+  background: var(--panel); text-decoration: none; max-width: 280px;
+}
+.sources .chip:hover { color: var(--text); border-color: color-mix(in srgb, var(--accent) 40%, var(--border)); }
+.sources .chip .domain { color: var(--accent); flex: none; }
+.sources .chip .title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sources .more { font-size: 12.5px; color: var(--muted); align-self: center; }
 
 /* ---------- composer ---------- */
 
@@ -500,12 +521,6 @@ pre.code code { display: block; padding: 12px; font-family: var(--mono); font-si
 .effort-btn:hover { background: var(--hover); color: var(--text); }
 .effort-btn svg { width: 15px; height: 15px; }
 .effort-btn.off .name { color: var(--muted); font-style: italic; }
-
-.effort-stops { display: flex; gap: 2px; background: var(--hover); border-radius: 9px; padding: 3px; }
-.effort-stops button { padding: 5px 9px; border-radius: 7px; font-size: 13px; color: var(--muted); }
-.effort-stops button.on { background: var(--panel); color: var(--text); }
-.effort-description { margin: 8px 0 0; font-size: 13px; color: var(--muted); }
-.effort-note { margin: 6px 0 0; font-size: 12px; color: var(--muted); }
 
 .send {
   width: 34px; height: 34px;
@@ -582,6 +597,9 @@ pre.code code { display: block; padding: 12px; font-family: var(--mono); font-si
 .menu [role="menuitem"].danger { color: var(--danger); }
 .menu [role="menuitem"].checked { color: var(--text); }
 .menu .tick { width: 16px; flex: none; color: var(--accent); }
+.menu .item-text { flex: 1; }
+.menu .item-desc { display: block; font-size: 12.5px; color: var(--muted); margin-top: 2px; }
+.menu .menu-note { padding: 6px 10px; font-size: 12px; color: var(--muted); font-style: italic; }
 .menu hr { border: 0; border-top: 1px solid var(--border); margin: 4px 6px; }
 
 /* control panels share the menu shell */
@@ -599,7 +617,7 @@ pre.code code { display: block; padding: 12px; font-family: var(--mono); font-si
   max-width: 220px;
 }
 .field input[type="checkbox"], .dialog input[type="checkbox"] { width: 16px; height: 16px; accent-color: var(--accent); }
-.field input[type="range"], .effort-stops + input[type="range"] { width: 160px; accent-color: var(--accent); }
+.field input[type="range"] { width: 160px; accent-color: var(--accent); }
 .field textarea { min-height: 70px; font-family: var(--mono); font-size: 13px; }
 
 /* ---------- settings dialog ---------- */

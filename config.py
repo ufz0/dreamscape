@@ -54,6 +54,26 @@ INDEX_MAX_LINES = env_int("INDEX_MAX_LINES", 150)
 PAGE_MAX_LINES = env_int("PAGE_MAX_LINES", 120)
 SEARCH_LIMIT = env_int("SEARCH_LIMIT", 40)
 
+# Web tools. The provider is duckduckgo unless Brave is configured with a key.
+SEARCH_PROVIDER = env("SEARCH_PROVIDER", "duckduckgo").strip().lower()
+BRAVE_API_KEY = env("BRAVE_API_KEY", "")
+SEARCH_TIMEOUT = env_int("SEARCH_TIMEOUT", 10)
+SEARCH_CACHE_MINUTES = env_int("SEARCH_CACHE_MINUTES", 10)
+SEARCH_RATE_LIMIT = env_int("SEARCH_RATE_LIMIT", 20)
+SEARCH_RATE_LIMIT_MINUTES = env_int("SEARCH_RATE_LIMIT_MINUTES", 10)
+
+# The tool loop keeps its own limit; a turn with web tools may use a few more iterations, up to a
+# hard cap.
+WEB_TOOL_ITERATIONS = env_int("WEB_TOOL_ITERATIONS", 12)
+MAX_TOOL_ITERATIONS_CAP = env_int("MAX_TOOL_ITERATIONS_CAP", 16)
+
+WEB_FETCH_MAX_CHARS = env_int("WEB_FETCH_MAX_CHARS", 24000)     # about 6000 tokens worth of text
+WEB_FETCH_MAX_BYTES = env_int("WEB_FETCH_MAX_BYTES", 2_000_000)
+WEB_FETCH_TIMEOUT = env_int("WEB_FETCH_TIMEOUT", 10)
+WEB_FETCH_MAX_REDIRECTS = env_int("WEB_FETCH_MAX_REDIRECTS", 3)
+WEB_FETCH_ALLOW_PRIVATE = env("WEB_FETCH_ALLOW_PRIVATE", "false").strip().lower() in ("1", "true", "yes", "on")
+USER_AGENT = env("WEB_USER_AGENT", "Dreamscape/1.0")
+
 # Slug rules for the wiki sandbox: lowercase slug, .md only, no traversal.
 SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,80}$")
 

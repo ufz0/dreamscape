@@ -250,6 +250,12 @@ function closeDrawer() {
 
 export async function openSettings() {
   const usage = await readUsage();
+  let provider = { provider: "", configured: false };
+  try {
+    provider = await api("/api/web");
+  } catch (error) {
+    // The line still says what is set, which is what a user needs here.
+  }
   openDialog("Settings", (card) => {
     card.append(section("Appearance", segmented(["system", "light", "dark"], settings.theme, (value) => {
       settings.theme = value;
@@ -277,6 +283,11 @@ export async function openSettings() {
         settings.generateTitles = value;
         save(settings);
       })),
+      controlRow("Use web tools for new chats", checkbox(settings.webSearch, (value) => {
+        settings.webSearch = value;
+        save(settings);
+      })),
+      providerLine(provider),
     ));
 
     card.append(section("Reasoning",
@@ -311,6 +322,16 @@ function section(title, ...fields) {
   heading.textContent = title;
   block.append(heading, ...fields);
   return block;
+}
+
+// Read-only: what the app is actually using for search. Nothing here changes .env.
+function providerLine(provider) {
+  const line = document.createElement("p");
+  line.className = "muted";
+  line.textContent = provider.configured
+    ? `Active provider: ${provider.provider}. ${provider.rate_limit} searches per ${provider.rate_limit_minutes} minutes, results cached ${provider.cache_minutes} minutes.`
+    : "No provider is configured. Set SEARCH_PROVIDER in .env, or BRAVE_API_KEY for Brave.";
+  return line;
 }
 
 export function controlRow(labelText, control) {

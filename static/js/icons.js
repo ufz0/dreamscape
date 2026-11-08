@@ -26,6 +26,7 @@ const PATHS = {
   menu: `<path d="M4 7h16M4 12h16M4 17h16"/>`,
   panel: `<rect x="3" y="4" width="18" height="16" rx="2.5"/><path d="M10 4v16"/>`,
   graph: `<circle cx="6.5" cy="12" r="2.6"/><circle cx="17" cy="7" r="2.6"/><circle cx="17" cy="17" r="2.6"/><path d="M8.9 11.1l5.6-2.8M8.9 12.9l5.6 2.8"/>`,
+  globe: `<circle cx="12" cy="12" r="7.5"/><path d="M4.5 12h15"/><path d="M12 4.5c2.4 2.1 2.4 7.3 0 9.5M12 4.5c-2.4 2.1-2.4 7.3 0 9.5"/>`,
   play: `<path d="M7 5.5l12 6.5-12 6.5z"/>`,
   fit: `<path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/>`,
 };

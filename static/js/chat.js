@@ -2,11 +2,24 @@
 import { escapeHtml } from "./api.js";
 import { renderMarkdown } from "./markdown.js";
 import { icon } from "./icons.js";
+import { canShowNote, noteText } from "./notes.js";
 
 // Which messages the user expanded in this session.
 const expanded = new Map();
 
+const WEB_TOOLS = new Set(["web_search", "web_fetch"]);
+
+function domainOf(url) {
+  try {
+    return new URL(url).hostname;
+  } catch (error) {
+    return String(url || "");
+  }
+}
+
 function summarize(name, args) {
+  if (name === "web_search") return `Searched the web: ${args.query || "?"}`;
+  if (name === "web_fetch") return `Read page: ${domainOf(args.url) || "?"}`;
   if (name === "wiki_read") return `Read wiki page: ${args.name || "?"}`;
   if (name === "wiki_write") return `${args.mode === "append" ? "Updated" : "Wrote"} wiki page: ${args.name || "?"}`;
   if (name === "wiki_search") return `Searched: ${args.query || "?"}`;
@@ -37,6 +50,108 @@ function pretty(value) {
   return typeof value === "string" ? value : JSON.stringify(value, null, 2);
 }
 
+// The body of a tool row. Web results are shown as what was found — title, source, snippet —
+// rather than as JSON, which is what makes the row readable when it is expanded.
+function toolBody(name, args, result) {
+  const body = document.createElement("div");
+  body.className = "tool-body";
+
+  const argumentsSection = document.createElement("div");
+  argumentsSection.className = "section";
+  argumentsSection.textContent = `arguments\n${pretty(args)}`;
+  body.append(argumentsSection);
+  if (result === undefined) return body;
+
+  if (!result.error && WEB_TOOLS.has(name)) {
+    if (name === "web_search" && result.results?.length) {
+      const list = document.createElement("div");
+      list.className = "results";
+      for (const item of result.results) {
+        const row = document.createElement("div");
+        row.className = "result-row";
+        const link = document.createElement("a");
+        link.href = item.url;
+        link.target = "_blank";
+        link.rel = "noopener noreferrer";
+        link.textContent = item.title || item.url;
+        const source = document.createElement("span");
+        source.className = "domain";
+        source.textContent = item.domain || domainOf(item.url);
+        if (item.date) source.textContent += ` · ${item.date}`;
+        row.append(link, source);
+        if (item.snippet) {
+          const snippet = document.createElement("div");
+          snippet.className = "snippet";
+          snippet.textContent = item.snippet;
+          row.append(snippet);
+        }
+        list.append(row);
+      }
+      body.append(list);
+      return body;
+    }
+    if (name === "web_fetch" && result.text) {
+      const link = document.createElement("a");
+      link.className = "section";
+      link.href = result.url;
+      link.target = "_blank";
+      link.rel = "noopener noreferrer";
+      link.textContent = result.title || result.url;
+      const text = document.createElement("div");
+      text.className = "section page-text";
+      text.textContent = result.text;
+      body.append(link, text);
+      return body;
+    }
+  }
+
+  const resultSection = document.createElement("div");
+  resultSection.className = "section";
+  resultSection.textContent = `result\n${pretty(result)}`;
+  body.append(resultSection);
+  return body;
+}
+
+// Which pages a turn read. Domain and title only, no favicons, max six chips then a count.
+function collectSources(name, result) {
+  if (!result || result.error || !WEB_TOOLS.has(name)) return [];
+  if (name === "web_search") {
+    return (result.results || []).map((item) => ({ url: item.url, title: item.title, domain: item.domain }));
+  }
+  return [{ url: result.url, title: result.title || result.url, domain: domainOf(result.url) }];
+}
+
+function sourcesRow(sources) {
+  const seen = new Set();
+  const unique = sources.filter((item) => item.url && !seen.has(item.url) && seen.add(item.url));
+  if (!unique.length) return null;
+
+  const row = document.createElement("div");
+  row.className = "sources";
+  for (const item of unique.slice(0, 6)) {
+    const chip = document.createElement("a");
+    chip.className = "chip";
+    chip.href = item.url;
+    chip.target = "_blank";
+    chip.rel = "noopener noreferrer";
+    const domain = document.createElement("span");
+    domain.className = "domain";
+    domain.textContent = item.domain || domainOf(item.url);
+    const title = document.createElement("span");
+    title.className = "title";
+    title.textContent = item.title || item.url;
+    chip.append(domain, title);
+    row.append(chip);
+  }
+  if (unique.length > 6) {
+    const more = document.createElement("span");
+    more.className = "more";
+    more.textContent = `+${unique.length - 6} more`;
+    row.append(more);
+  }
+  return row;
+}
+
 function toolRow(name, args, result, running) {
   const row = document.createElement("div");
   row.className = "tool";
@@ -45,15 +160,10 @@ function toolRow(name, args, result, running) {
   const head = document.createElement("button");
   head.className = "tool-head";
   head.setAttribute("aria-expanded", "false");
-  head.innerHTML = `${icon(running ? "spinner" : "wrench", 16)}` +
+  head.innerHTML = `${icon(running ? "spinner" : (WEB_TOOLS.has(name) ? "globe" : "wrench"), 16)}` +
     `<span class="label">${escapeHtml(summarize(name, args))}</span>${icon("chevron", 14)}`;
 
-  const body = document.createElement("div");
-  body.className = "tool-body";
-  const argumentsSection = `arguments\n${escapeHtml(pretty(args))}`;
-  const resultSection = result === undefined ? "" : `result\n${escapeHtml(pretty(result))}`;
-  body.innerHTML = `<div class="section">${argumentsSection}</div>` +
-    (resultSection ? `<div class="section">${resultSection}</div>` : "");
+  const body = toolBody(name, args, result);
 
   head.addEventListener("click", () => {
     const open = row.classList.toggle("open");
@@ -169,27 +279,26 @@ export class ChatView {
   render(records) {
     this.clear();
     this.stickToBottom = true;
-    const rows = new Map();
+    const turns = currentTurns(records);
 
-    for (const record of currentTurns(records)) {
+    // Results are stored after the call that asked for them, so read them first: a tool row can
+    // then be built complete, with the arguments and the result together.
+    const results = new Map();
+    for (const record of turns) {
+      if (record.role !== "tool") continue;
+      try {
+        results.set(record.tool_call_id, JSON.parse(record.content));
+      } catch (error) {
+        results.set(record.tool_call_id, record.content);
+      }
+    }
+
+    for (const record of turns) {
       if (record.role === "user") {
         this.addUser(record.content || "", { showActions: true });
         continue;
       }
-
-      if (record.role === "tool") {
-        const row = rows.get(record.tool_call_id);
-        if (!row) continue;
-        const result = (() => { try { return JSON.parse(record.content); } catch (error) { return record.content; } })();
-        row.querySelector(".tool-body").innerHTML =
-          `<div class="section">arguments\n${escapeHtml(pretty(row.dataset.args))}</div>` +
-          `<div class="section">result\n${escapeHtml(pretty(result))}</div>`;
-        if (result && typeof result === "object" && result.error) {
-          row.classList.add("failed");
-          row.querySelector(".label").textContent = `${summarize(record.name, JSON.parse(row.dataset.args))} — ${result.error}`;
-        }
-        continue;
-      }
+      if (record.role === "tool") continue;
 
       const message = document.createElement("div");
       message.className = "msg assistant";
@@ -215,20 +324,23 @@ export class ChatView {
         message.append(text);
       }
 
+      const sources = [];
       for (const call of record.tool_calls || []) {
-        const row = toolRow(call.name, call.arguments, undefined, false);
+        const result = results.get(call.id);
+        const row = toolRow(call.name, call.arguments, result, false);
         row.dataset.key = record.ts + (call.id || "");
-        row.dataset.args = JSON.stringify(call.arguments);
-        rows.set(call.id, row);
         if (expanded.get(`tool:${row.dataset.key}`)) {
           row.classList.add("open");
           row.querySelector(".tool-head").setAttribute("aria-expanded", "true");
         }
         message.append(row);
+        sources.push(...collectSources(call.name, result));
       }
 
-      if (record.reasoning_only) message.append(note("No final answer, the model stopped during reasoning."));
+      if (canShowNote(record)) message.append(note(noteText(record)));
       if (record.stopped) message.append(note("Stopped before the answer was complete."));
+      const chips = sourcesRow(sources);
+      if (chips) message.append(chips);
       if (record.content || record.reasoning) {
         message.append(actions(record.model || this.model, () => record.content || "", {
           retry: this.onRetry, edit: this.onEdit,
@@ -265,6 +377,7 @@ export class ChatView {
     this.textBlock = null;
     this.thinking = null;
     this.rows = new Map();
+    this.sources = [];
     this.raw = "";
     this.container.append(message);
     return message;
@@ -316,16 +429,16 @@ export class ChatView {
         this.current.append(row);
       } else {
         row.classList.remove("running");
-        row.querySelector(".tool-head svg").outerHTML = icon("wrench", 16);
-        const body = row.querySelector(".tool-body");
-        body.innerHTML = `<div class="section">arguments\n${escapeHtml(pretty(event.arguments))}</div>` +
-          `<div class="section">result\n${escapeHtml(pretty(event.result))}</div>`;
+        row.querySelector(".tool-head svg").outerHTML = icon(WEB_TOOLS.has(event.name) ? "globe" : "wrench", 16);
+        row.querySelector(".tool-body").remove();
+        row.append(toolBody(event.name, event.arguments, event.result));
         if (event.result && typeof event.result === "object" && event.result.error) {
           row.classList.add("failed");
           row.querySelector(".label").textContent =
             `${summarize(event.name, event.arguments)} — ${event.result.error}`;
         }
       }
+      this.sources.push(...collectSources(event.name, event.result));
       this.textBlock = null;
       if (this.stickToBottom) this.scrollToBottom();
       return;
@@ -348,11 +461,17 @@ export class ChatView {
           this.thinking.line.setAttribute("aria-expanded", "true");
         }
       }
-      if (event.reasoning_only) this.current.append(note("No final answer, the model stopped during reasoning."));
+      // Nothing is still streaming for this step, so a note here is the real case: thinking and no
+      // answer, on the last step of the turn. A step that ended in a tool call shows its tool row
+      // instead, and a tool that is still running keeps the note off until the answer comes.
+      const runningTool = [...this.rows.values()].some((row) => row.classList.contains("running"));
+      if (canShowNote(event, { runningTool })) this.current.append(note(noteText(event)));
       if (!event.tool_calls?.length) {
         const block = this.textBlock || this.ensureTextBlock();
         if (this.raw) block.innerHTML = renderMarkdown(this.raw);
         for (const caret of this.current.querySelectorAll(".caret")) caret.remove();
+        const chips = sourcesRow(this.sources);
+        if (chips) this.current.append(chips);
         this.current.classList.remove("current");
         for (const node of this.container.querySelectorAll(".msg.last")) node.classList.remove("last");
         this.current.classList.add("last");
