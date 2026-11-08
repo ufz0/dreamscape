@@ -9,6 +9,8 @@ Everything here normalises upstream responses into one event shape:
 
 Answer text and thinking are kept apart because the UI shows thinking collapsed by default and
 the transcript stores thinking in its own field.
+
+  {"type": "finish", "finish_reason": str}          how the turn ended, after the text is complete
 """
 import json
 from typing import AsyncIterator
@@ -178,6 +180,7 @@ async def stream_chat(messages: list[dict], model: str, temperature: float,
 
     calls: dict[int, dict] = {}
     splitter = ThinkSplitter()
+    finish_reason = None
     async with client() as c:
         async with c.stream("POST", "/chat/completions", json=payload) as r:
             r.raise_for_status()
@@ -204,10 +207,16 @@ async def stream_chat(messages: list[dict], model: str, temperature: float,
                             slot["name"] = function["name"]
                         if function.get("arguments"):
                             slot["arguments"] += function["arguments"]
-                    if choice.get("finish_reason") == "tool_calls" and calls:
-                        assembled = [calls[i] for i in sorted(calls)]
-                        yield {"type": "tool_calls", "tool_calls": assembled}
+                    if choice.get("finish_reason"):
+                        finish_reason = choice["finish_reason"]
+                        if finish_reason == "tool_calls" and calls:
+                            assembled = [calls[i] for i in sorted(calls)]
+                            yield {"type": "tool_calls", "tool_calls": assembled}
                 if chunk.get("usage"):
                     yield {"type": "usage", "usage": chunk["usage"]}
+    # Held-back text that could still have been part of a think tag, then how the turn ended.
+    # The finish reason is reported last so the caller knows whether more tool iterations follow.
     for kind, piece in splitter.flush():
         yield {"type": kind, "content": piece}
+    if finish_reason:
+        yield {"type": "finish", "finish_reason": finish_reason}
