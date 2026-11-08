@@ -1,0 +1,22 @@
+{
+  "name": "dreamscape",
+  "short_name": "dreamscape",
+  "description": "A chat app whose memory is a wiki it rebuilds while dreaming.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#faf9f5",
+  "theme_color": "#faf9f5",
+  "icons": [
+    {
+      "src": "/static/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png"
+    },
+    {
+      "src": "/static/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    }
+  ]
+}
