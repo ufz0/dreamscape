@@ -252,9 +252,7 @@ async def run(trigger: str = "", dry_run: bool = False, force: bool = False,
                     break
                 item["note"] = result["answer"]
                 if result["usage"]:
-                    report["usage"] = report["usage"] or {}
-                    for key, value in result["usage"].items():
-                        report["usage"][key] = report["usage"].get(key, 0) + value
+                    report["usage"] = dreamlog.add_usage(report["usage"], result["usage"])
                 processed.append((path, item))
                 dreamlog.emit({"type": "transcript", "id": record["id"], "phase": path.name,
                                "file": path.name, "transcript": path.name,
