@@ -182,7 +182,7 @@ export class DreamLogView {
       record.reasoning_effort && Object.entries(record.reasoning_effort)
         .map(([phase, level]) => `effort ${phase}: ${level}`).join(", "),
       duration(record.duration_seconds),
-      record.usage && Object.entries(record.usage).map(([key, value]) => `${key}: ${value}`).join(" "),
+      formatUsage(record.usage),
       record.transcripts.length ? `${record.transcripts.length} transcripts` : "",
     ].filter(Boolean);
     const line = document.createElement("p");
@@ -470,6 +470,18 @@ function part(label, value) {
   text.textContent = value;
   section.append(strong, text);
   return section;
+}
+
+// Usage can have a nested split (reasoning tokens, cached tokens), so show those as their own group.
+function formatUsage(usage) {
+  if (!usage) return "";
+  return Object.entries(usage).map(([key, value]) => {
+    if (value && typeof value === "object") {
+      const parts = Object.entries(value).map(([inner, number]) => `${inner}=${number}`).join(" ");
+      return parts ? `${key} ${parts}` : "";
+    }
+    return `${key}: ${value}`;
+  }).filter(Boolean).join(" ");
 }
 
 function countsLine(run) {

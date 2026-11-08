@@ -89,6 +89,24 @@ def unified_diff(old: str, new: str, name: str) -> dict:
                                  line.startswith(("+++", "---")))}
 
 
+def add_usage(total: dict | None, usage: dict) -> dict:
+    """Add one usage block to the run total.
+
+    A usage block is not always flat: some servers put the split in a nested dict, e.g.
+    completion_tokens_details: {"reasoning_tokens": 42}. Only numbers are added; nested dicts are
+    merged the same way, so a dict-valued field never ends up added to an int.
+    """
+    total = dict(total or {})
+    for key, value in usage.items():
+        if isinstance(value, dict):
+            total[key] = add_usage(total.get(key), value)
+        elif isinstance(value, bool):
+            total[key] = total.get(key, 0) + int(value)
+        elif isinstance(value, (int, float)):
+            total[key] = total.get(key, 0) + value
+    return total
+
+
 def summary(result: dict) -> str:
     if not isinstance(result, dict):
         return str(result)[:RESULT_MAX_CHARS]
