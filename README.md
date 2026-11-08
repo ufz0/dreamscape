@@ -9,7 +9,11 @@ accounts and usage, plain files for everything else — no framework, no build s
 ## Features
 
 - Chat with a wiki tool loop (`wiki_list`, `wiki_read`, `wiki_search`, `wiki_write`), thinking
-  shown separately from the answer, and a four-step reasoning-effort control.
+  shown separately from the answer, and a reasoning-effort menu (four levels, remembered per chat).
+- Web tools in chat, off per conversation from the tools popup: `web_search` (DuckDuckGo by default,
+  Brave when a key is set) and `web_fetch` with an SSRF check repeated after every redirect. Results
+  are cached per query and rate-limited per user, and the model is told that page text is data, not
+  instructions. Dreaming keeps the wiki tools only, so it is never fed pages it cannot verify.
 - A wiki viewer with List, Graph and Dream log tabs. The graph is a canvas force layout with no
   library; the dream log shows each run, its steps per transcript, the diffs, and live progress.
 - A nightly dreaming job, runnable from cron or from the "Dream now" button, with structured
@@ -67,9 +71,50 @@ Crontab line for the 03:00 dream:
 0 3 * * * cd /Users/lukas/Projects/dreamscape && .venv/bin/python dream.py >> data/dream.cron.log 2>&1
 ```
 
-The job is one process with one lockfile (`data/.dream.lock`), so cron and the "Dream now" button
-never overlap. "Dream now" in the UI dreams only for the signed-in user; the cron job loops over
-all active users.
+Or run the same job from the scheduler, which is what the container does. It wakes at a wall-clock
+time in the app's timezone (`DREAM_TIME`, default 03:00, in `TIMEZONE`), so it moves with the
+changeover to winter time, and it does nothing else:
+
+```sh
+.venv/bin/python scripts/dream_scheduler.py                 # waits for 03:00 in TIMEZONE
+.venv/bin/python scripts/dream_scheduler.py --at 02:30      # a different time
+.venv/bin/python scripts/dream_scheduler.py --run-now       # dream once, then keep the schedule
+```
+
+A run that cannot take the lock (the "Dream now" button is busy, or a previous run is still going)
+is skipped and the next night is scheduled as normal. A failed night is logged and the scheduler
+keeps running. SIGTERM and SIGINT stop it between runs.
+
+The job is one process with one lockfile (`data/.dream.lock`), so cron, the scheduler and the
+"Dream now" button never overlap. "Dream now" in the UI dreams only for the signed-in user; the
+scheduler and the cron job loop over all active users.
+
+## Docker
+
+```sh
+cp .env.example .env                # both services read this file
+docker build --build-arg PUID=$(id -u) --build-arg PGID=$(id -g) .
+docker compose up -d
+```
+
+Two services from one image:
+
+- `app` — the web app on port 8000, published to loopback only. It always binds `0.0.0.0` inside the
+  container, whatever `HOST` says in `.env`; put it behind HTTPS if you publish it further, so the
+  session cookie can be marked `Secure`.
+- `dreamer` — `scripts/dream_scheduler.py`, running the job at `DREAM_TIME` each night.
+
+`data/` is a bind mount, so the build args should match the user that owns it. The image runs as a
+non-root user, and it marks the mounted wiki repositories as safe for git (`git config --global --add
+safe.directory '*'`), because a bind mount belongs to the host user; the commit identity itself comes
+from `dream.py`. The health check asks the unauthenticated `/healthz`, which answers 200 when the app
+can read its own database and 503 when it cannot.
+
+```sh
+docker compose up -d app
+docker compose logs -f dreamer       # what the nightly runs did
+docker compose run --rm dreamer python dream.py --dry-run
+```
 
 ## Accounts
 
@@ -79,7 +124,7 @@ and it is marked `Secure` when the request arrives over https (read from `X-Forw
 The CSRF cookie is deliberately not `HttpOnly`, because the page has to read it and send it back
 as `X-CSRF-Token`; every state-changing request is checked for that.
 
-- Passwords are hashed with argon2, minimum 10 characters. Usernames are case-insensitive unique,
+- Passwords are hashed with argon2, minimum 8 characters. Usernames are case-insensitive unique,
   3–32 characters, `[a-z0-9._-]`.
 - Sessions are random tokens stored only as a SHA-256 hash, 30-day expiry, sliding on use. Logout
   deletes the session; a password change, disabling a user or deleting a user invalidates their sessions.
@@ -160,14 +205,24 @@ first reply" (on by default). Titles are cleaned to one line, no quotes, max 60 
 
 ```sh
 .venv/bin/python -m pytest tests/ -q
+node --test tests/js/notes.test.mjs
 ```
 
 The tests cover the limit semantics (every combination, the boundary at exactly the limit, day and
 week rollover including the Monday start and the timezone), period aggregation, the last-admin rule,
 first-run setup, login rate limiting, chat titles (cleaning, the metered call and the estimate when the
-endpoint reports nothing, a typed name kept, a reached limit skipping the call), and per-user isolation
-through both the tools and the endpoints. They run against a throwaway data folder, never the real `data/`;
-the fixture clears the user folders too, because user ids are reused once the rows are deleted.
+endpoint reports nothing, a typed name kept, a reached limit skipping the call), per-user isolation
+through both the tools and the endpoints, the stream parser and tool loop against a fake upstream
+(tool calls split across chunks, thinking tags split across chunks, the missing-answer rule), the web
+tools (one result shape for both providers, the cache, the per-user rate limit, the SSRF block
+including a redirect to a private address, truncation), and the nightly scheduler's clock across the
+changeover to winter time. The one UI rule that is worth testing — when the "no final answer" note may
+be shown — is in `static/js/notes.js` and tested as a plain node test, with a pytest wrapper so it
+runs with the rest.
+
+They run against a throwaway data folder, never the real `data/`; the fixture clears the user folders
+too, because user ids are reused once the rows are deleted. Nothing in the tests calls the network: the
+upstream and the search providers are replaced, and the fetch tests use a local server.
 
 `scripts/seed_demo.py` creates a few fake users with fake usage over several months for looking at the
 admin charts. It is never run automatically and writes to its own `data/demo` folder.
@@ -182,18 +237,22 @@ db.py          SQLite schema (users, sessions, usage_events, login_attempts, aud
 limits.py      limit parsing, local day/week windows, the check, reset time
 usage.py       recording one call, and period aggregation for the admin views
 appdata.py     per-user data folders, contextvar for the current user, first-run migration
-agent.py       wiki tools + tool loop (usage and limit hooks)
+agent.py       wiki tools + web tools + tool loop (usage and limit hooks)
 llm.py         httpx upstream, normalised streaming events, one non-streaming completion
+websearch.py   search providers (ddgs, brave), cache, per-user rate limit, one result shape
+webfetch.py    one page to text: SSRF check after every redirect, caps, truncation
 titles.py      naming a chat from the first exchange, cleaning the result, the metered call
 dream.py       the dreaming job, per user
 dreamlog.py    run records, readers, live progress per user
 graph.py       graph data for the wiki view, cached per user
 reasoning.py   effort levels -> request fields per model
 wiki.py store.py config.py
-prompts/       system.md, dream_per_transcript.md, dream_cleanup.md, title.md
+prompts/       system.md, web_tools.md, dream_per_transcript.md, dream_cleanup.md, title.md
 static/        index.html, wiki.html, auth.html, admin.html, styles.css, admin.css,
                js/ modules (including the account popup and the admin panel), fonts/, icons
-scripts/       make_logo.py, make_icons.py, seed_demo.py
+scripts/       make_logo.py, make_icons.py, seed_demo.py, dream_scheduler.py, healthcheck.py
+tests/         pytest, plus tests/js/ for the UI state rule (plain node test)
+Dockerfile, docker-compose.yml, .dockerignore
 design/        the logo candidates that were not picked
 data/          app.db, users/<id>/…, reasoning.json — not committed
 ```
