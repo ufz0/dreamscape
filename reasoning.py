@@ -52,25 +52,61 @@ def settings() -> dict:
     return merged
 
 
-def override_for(model: str) -> dict:
-    """First pattern that matches the model name; exact names win over wildcards."""
-    for pattern, rule in settings().get("model_overrides", {}).items():
-        if model == pattern:
-            return rule
-    for pattern, rule in settings().get("model_overrides", {}).items():
-        if "*" in pattern or "?" in pattern:
-            if fnmatch.fnmatch(model, pattern):
+def override_for(model: str, config_map: dict | None = None) -> dict:
+    """First pattern that matches the model name; exact names win over wildcards.
+
+    A namespaced id (`<connection slug>/<model id>`) is matched both as written and by its model
+    part, so an existing pattern like `qwen3*` still works for a model on a connection.
+    """
+    config_map = config_map or settings()
+    names = [model, model.split("/", 1)[1] if "/" in model else model]
+    for value in names:
+        for pattern, rule in config_map.get("model_overrides", {}).items():
+            if value == pattern:
                 return rule
+    for value in names:
+        for pattern, rule in config_map.get("model_overrides", {}).items():
+            if "*" in pattern or "?" in pattern:
+                if fnmatch.fnmatch(value, pattern):
+                    return rule
     return {}
 
 
-def resolve(model: str, level: str) -> dict:
-    """What to send for one model at one level: body fields, extra system text, budget, and whether
-    the level is only approximated by wording."""
+def layer(base: dict | None, extra: dict | None) -> dict:
+    """Two reasoning maps merged: `extra` (a model's own) wins over `base` (its connection's)."""
+    merged = {**(base or {}), **(extra or {})}
+    merged["levels"] = {**(base or {}).get("levels", {}), **(extra or {}).get("levels", {})}
+    merged["model_overrides"] = {**(base or {}).get("model_overrides", {}),
+                                 **(extra or {}).get("model_overrides", {})}
+    return merged
+
+
+def model_mapping(model: str, mapping: dict | None = None) -> dict:
+    """The mapping for one model: the file default, the connection's map, then the model's own.
+
+    Each layer only adds what it names, so a connection can change the fields for its engines and a
+    model can still say something different from its connection.
+    """
     config_map = settings()
+    if mapping:
+        config_map = {**config_map, **mapping}
+        config_map["levels"] = {**config_map.get("levels", {}), **(mapping.get("levels") or {})}
+        config_map["model_overrides"] = {**config_map.get("model_overrides", {}),
+                                         **(mapping.get("model_overrides") or {})}
+    return config_map
+
+
+def resolve(model: str, level: str, mapping: dict | None = None) -> dict:
+    """What to send for one model at one level: body fields, extra system text, budget, and whether
+    the level is only approximated by wording.
+
+    `mapping` is a connection's own reasoning map. It is layered over the file, so a connection can
+    say something different from the default without changing the default for the others.
+    """
+    config_map = model_mapping(model, mapping)
     level_key = level if level in LEVELS else config_map.get("default_level", "medium")
     spec = dict(config_map["levels"].get(level_key, {}))
-    rule = override_for(model)
+    rule = override_for(model, config_map)
     spec = {**spec, **rule.get("levels", {}).get(level_key, {})}
 
     body = dict(spec.get("body") or {})

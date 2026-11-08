@@ -1,8 +1,11 @@
 """The wiki tools the model can call, and the tool loop shared by chat and dreaming."""
 import json
 import time
+from contextlib import nullcontext
+from datetime import datetime, timezone
 from typing import AsyncIterator
 
+import connections
 import config
 import llm
 import reasoning
@@ -70,6 +73,20 @@ WEB_TOOLS = [
 WEB_TOOL_NAMES = {tool["function"]["name"] for tool in WEB_TOOLS}
 
 
+def system_prompt(system: str, inject_index: bool = True, effort_line: str = "", web: bool = False) -> str:
+    """The system prompt for a turn. Lives here because the run engine builds turns too."""
+    if inject_index:
+        index = wiki.index_text()
+    else:
+        index = "(wiki index not injected for this conversation)"
+    base = config.read_prompt("system.md", date=datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+                             index=index, system=system or "(none)")
+    # Only when the web tools are actually offered to this conversation.
+    if web:
+        base = f"{base}\n\n{config.read_prompt('web_tools.md')}"
+    return f"{base}\n\n{effort_line}" if effort_line else base
+
+
 async def run_tool(name: str, arguments: dict, user_id=None) -> dict:
     """One tool call. A provider failure is an error the model can react to, never a crashed turn."""
     if name == "web_search":
@@ -121,7 +138,8 @@ def execute_tool(name: str, arguments: dict) -> dict:
 async def run_loop(messages: list[dict], model: str, temperature: float,
                    max_iterations: int = config.MAX_TOOL_ITERATIONS,
                    mapping: dict | None = None, on_usage=None, limit_check=None,
-                   tools: list[dict] | None = None, user_id=None) -> AsyncIterator[dict]:
+                   tools: list[dict] | None = None, user_id=None, target: dict | None = None,
+                   on_position=None, cancelled=None) -> AsyncIterator[dict]:
     """Call the model, run any tool calls, repeat until it answers or the limit is hit.
 
     `mapping` is the resolved reasoning-effort request for this turn (see reasoning.py). It is
@@ -134,13 +152,18 @@ async def run_loop(messages: list[dict], model: str, temperature: float,
     limit, no call is made and a "limit_reached" event is yielded instead. A response that is
     already streaming is allowed to finish, so a user can overshoot by at most one response.
 
-    Yields the upstream events plus three of its own:
+    Yields the upstream events plus four of its own:
       {"type": "assistant_message", "content", "reasoning", "reasoning_ms", "reasoning_only", "note", "tool_calls"}
       {"type": "tool", "id", "name", "arguments", "result"}
       {"type": "limit_reached", ...}
+      {"type": "queued", "position": int}   only when the connection's queue was full
 
     `tools` is the list for this turn. Without it the wiki tools are used, which is what dreaming
     gets: `user_id` is only there for the web tools' rate limit.
+
+    `on_position(position)` is called when this call has to wait behind other requests on the
+    connection's queue (see connections.Gate), and `cancelled()` is checked while waiting so a
+    cancelled run does not sit in the queue. A target with no connection is not queued.
 
     Thinking stays in its own field and is never sent back to the model in later turns.
     "reasoning_only" is only true for the final step of a turn, when the model produced thinking
@@ -156,7 +179,12 @@ async def run_loop(messages: list[dict], model: str, temperature: float,
     limit = min(config.MAX_TOOL_ITERATIONS_CAP,
                 max(max_iterations, config.WEB_TOOL_ITERATIONS) if web else max_iterations)
 
+    queue = connections.gate(target) if target and target.get("connection_id") else None
+    resolved_target = target or llm.default_target()
+
     for iteration in range(limit):
+        if cancelled and cancelled():
+            return
         if limit_check:
             blocked = limit_check()
             if blocked:
@@ -169,18 +197,20 @@ async def run_loop(messages: list[dict], model: str, temperature: float,
         calls: list[dict] = []
         reported = None
         finish_reason = None
-        async for event in llm.stream_chat(messages, model, temperature, tools=active, extra_body=extra_body):
-            if event["type"] == "usage":
-                reported = event.get("usage") or {}
-            elif event["type"] == "finish":
-                finish_reason = event.get("finish_reason")
-            elif event["type"] == "delta":
-                content += event["content"]
-            elif event["type"] == "reasoning":
-                reasoning_text += event["content"]
-            elif event["type"] == "tool_calls":
-                calls = event["tool_calls"]
-            yield event
+        async with (queue.acquire(on_position, cancelled) if queue else nullcontext()):
+            async for event in llm.stream_chat(resolved_target, model, messages, temperature,
+                                               tools=active, extra_body=extra_body):
+                if event["type"] == "usage":
+                    reported = event.get("usage") or {}
+                elif event["type"] == "finish":
+                    finish_reason = event.get("finish_reason")
+                elif event["type"] == "delta":
+                    content += event["content"]
+                elif event["type"] == "reasoning":
+                    reasoning_text += event["content"]
+                elif event["type"] == "tool_calls":
+                    calls = event["tool_calls"]
+                yield event
 
         if on_usage:
             if reported:

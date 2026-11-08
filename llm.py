@@ -1,16 +1,20 @@
-"""Thin OpenAI-compatible client for the Strata engine.
+"""Thin OpenAI-compatible client for one inference connection.
 
 Everything here normalises upstream responses into one event shape:
-  {"type": "delta", "content": str}          answer text only
-  {"type": "reasoning", "content": str}       thinking text, either from the reasoning_content
-                                             field or from <think>...</think> inside content
-  {"type": "tool_calls", "tool_calls": [...]} complete tool calls for this turn
+  {"type": "delta", "content": str}                answer text only
+  {"type": "reasoning", "content": str, "field": str}   thinking text, from the reasoning_content
+      field or from <think>...</think> inside content. `field` says which one it was: the admin panel
+      reports the field names an engine actually answers with.
+  {"type": "tool_calls", "tool_calls": [...]}        complete tool calls for this turn
   {"type": "usage", "usage": {...}}
 
-Answer text and thinking are kept apart because the UI shows thinking collapsed by default and
-the transcript stores thinking in its own field.
+Answer text and thinking are kept apart because the UI shows thinking collapsed by default and the
+transcript stores thinking in its own field.
 
-  {"type": "finish", "finish_reason": str}          how the turn ended, after the text is complete
+  {"type": "finish", "finish_reason": str}           how the turn ended, after the text is complete
+
+The functions take a resolved target from connections.py (base url, headers, paths, timeout), so one
+protocol can point at several engines at the same time.
 """
 import json
 from typing import AsyncIterator
@@ -123,49 +127,75 @@ def parse_text_tool_call(text: str, tool_names: set | None = None) -> dict | Non
     return None
 
 
-def client() -> httpx.AsyncClient:
+def default_target() -> dict:
+    """The target from .env, for the code paths that do not have a connection row (a test, or a
+    script started before the database has any connections)."""
     headers = {"Content-Type": "application/json"}
     if config.API_KEY:
         headers["Authorization"] = f"Bearer {config.API_KEY}"
-    return httpx.AsyncClient(base_url=config.BASE_URL, headers=headers, timeout=httpx.Timeout(120.0, connect=10.0))
+    return {"connection_id": None, "slug": "", "base_url": config.BASE_URL, "headers": headers,
+            "timeout": 120.0, "path_models": "/models", "path_chat": "/chat/completions"}
 
 
-async def list_models() -> list[dict]:
-    async with client() as c:
-        r = await c.get("/models")
+def client(target: dict) -> httpx.AsyncClient:
+    """One connection to one engine. `target` is what connections.py resolved for it."""
+    return httpx.AsyncClient(base_url=target["base_url"], headers=dict(target["headers"]),
+                            timeout=httpx.Timeout(float(target.get("timeout") or 120.0), connect=10.0))
+
+
+def request_model(target: dict, model: str) -> str:
+    """The id this engine knows. The namespaced form is ours, not the server's.
+
+    A slug never contains a slash, so the first slash separates it from the model id, which may
+    itself contain one (`team/open-model`).
+    """
+    if target.get("slug") and "/" in model:
+        return model.split("/", 1)[1]
+    return model
+
+
+async def list_models(target: dict) -> list[dict]:
+    async with client(target) as c:
+        r = await c.get(target.get("path_models") or "/models")
         r.raise_for_status()
         return r.json().get("data", [])
 
 
-async def complete(messages: list[dict], model: str, temperature: float,
+async def complete(target: dict, model: str, messages: list[dict], temperature: float,
                    max_tokens: int | None = None, extra_body: dict | None = None) -> dict:
     """One completion, not streamed. Returns the text and whatever usage the server reported."""
-    payload = {"model": model, "messages": messages}
+    payload = {"model": request_model(target, model), "messages": messages}
     if temperature is not None:
         payload["temperature"] = temperature
     if max_tokens:
         payload["max_tokens"] = max_tokens
+    for key, value in (target.get("body_overrides") or {}).items():
+        payload[key] = value
     for key, value in (extra_body or {}).items():
         payload[key] = value
 
-    async with client() as c:
-        r = await c.post("/chat/completions", json=payload)
+    async with client(target) as c:
+        r = await c.post(target.get("path_chat") or "/chat/completions", json=payload)
         r.raise_for_status()
         body = r.json()
 
     choice = (body.get("choices") or [{}])[0]
-    return {"text": (choice.get("message") or {}).get("content") or "", "usage": body.get("usage") or {}}
+    message = choice.get("message") or {}
+    return {"text": message.get("content") or "", "usage": body.get("usage") or {},
+            # What the engine answered with, for the capability check: the field names it used.
+            "fields": sorted(key for key in message if key != "content" and key != "role")}
 
 
-async def stream_chat(messages: list[dict], model: str, temperature: float,
+async def stream_chat(target: dict, model: str, messages: list[dict], temperature: float,
                      tools: list[dict] | None = None, max_tokens: int | None = None,
                      extra_body: dict | None = None) -> AsyncIterator[dict]:
     """Stream one completion. Tool call arguments arrive as deltas, so assemble them by index.
 
-    extra_body carries the request fields the reasoning mapping resolved for this turn
-    (reasoning_effort, chat_template_kwargs, ...). It is merged last so the mapping wins.
+    The connection's own request fields come from `target`; `extra_body` carries what the reasoning
+    mapping resolved for this turn (reasoning_effort, chat_template_kwargs, ...). It is merged last,
+    so a per-turn mapping wins over the connection's defaults.
     """
-    payload = {"model": model, "messages": messages, "stream": True}
+    payload = {"model": request_model(target, model), "messages": messages, "stream": True}
     # Ask for the usage block in the last streamed chunk; servers that support stream_options send
     # it as an extra chunk with no choices. When it does not come back, the caller estimates.
     payload["stream_options"] = {"include_usage": True}
@@ -175,14 +205,16 @@ async def stream_chat(messages: list[dict], model: str, temperature: float,
         payload["tools"] = tools
     if max_tokens:
         payload["max_tokens"] = max_tokens
+    for key, value in (target.get("body_overrides") or {}).items():
+        payload[key] = value
     for key, value in (extra_body or {}).items():
         payload[key] = value
 
     calls: dict[int, dict] = {}
     splitter = ThinkSplitter()
     finish_reason = None
-    async with client() as c:
-        async with c.stream("POST", "/chat/completions", json=payload) as r:
+    async with client(target) as c:
+        async with c.stream("POST", target.get("path_chat") or "/chat/completions", json=payload) as r:
             r.raise_for_status()
             async for raw in r.aiter_lines():
                 if not raw.startswith("data:"):
@@ -194,10 +226,13 @@ async def stream_chat(messages: list[dict], model: str, temperature: float,
                 for choice in chunk.get("choices", []):
                     delta = choice.get("delta") or {}
                     for kind, piece in splitter.feed(delta.get("content") or ""):
-                        yield {"type": kind, "content": piece}
+                        if kind == "reasoning":
+                            yield {"type": "reasoning", "content": piece, "field": "think_tag"}
+                        else:
+                            yield {"type": kind, "content": piece}
                     reasoning = delta.get("reasoning_content")
                     if reasoning:
-                        yield {"type": "reasoning", "content": reasoning}
+                        yield {"type": "reasoning", "content": reasoning, "field": "reasoning_content"}
                     for call in delta.get("tool_calls") or []:
                         slot = calls.setdefault(call.get("index", 0), {"id": "", "name": "", "arguments": ""})
                         if call.get("id"):
@@ -217,6 +252,9 @@ async def stream_chat(messages: list[dict], model: str, temperature: float,
     # Held-back text that could still have been part of a think tag, then how the turn ended.
     # The finish reason is reported last so the caller knows whether more tool iterations follow.
     for kind, piece in splitter.flush():
-        yield {"type": kind, "content": piece}
+        if kind == "reasoning":
+            yield {"type": "reasoning", "content": piece, "field": "think_tag"}
+        else:
+            yield {"type": kind, "content": piece}
     if finish_reason:
         yield {"type": "finish", "finish_reason": finish_reason}
