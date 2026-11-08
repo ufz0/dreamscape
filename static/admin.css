@@ -80,6 +80,52 @@
 
 .window { display: flex; align-items: center; gap: 8px; }
 
+/* What a user set and what actually applies are not the same thing: an empty field inherits, and
+   "unlimited" is the one value that overrides a global default. So the row shows the field for
+   editing and, under it, the limit in force and where it comes from. */
+.effective { margin: 3px 0 0; font-family: var(--mono); font-size: 11.5px; color: var(--muted); }
+
+/* ---------- runtime settings ---------- */
+
+/* A form, not a table: one value per row, with the rule it follows stated where it is not obvious. */
+.settings-grid { display: grid; gap: 9px; max-width: 560px; }
+.settings-grid .field { flex-wrap: wrap; }
+.settings-grid .field label { flex: 1 1 200px; }
+.settings-grid .field input, .settings-grid .field select { flex: 0 0 170px; }
+.settings-grid .field .help { flex: 1 1 100%; font-size: 12px; color: var(--muted); }
+
+/* ---------- connections ---------- */
+
+/* A connection card is the log-row shell: a head with the state, and a body that is only open when
+   there is something to read. A test result is worth reading, so a card that has one starts open. */
+.conn .log-row-head .value { flex: 1; min-width: 0; font-family: var(--mono); font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* The card's name is what a person reads, the URL is what the machine uses; only the second is mono. */
+.conn .row-toggle .name { color: var(--text); font-size: 13.5px; }
+.conn .meta.waiting { color: var(--warn); }
+
+/* One line per check, because an engine can answer plainly and still not do tool calls. Each row
+   states what was asked, what came back, and how long it took. */
+.checks { display: grid; gap: 4px; padding: 8px 0 4px; }
+.check { display: flex; align-items: center; gap: 8px; font-size: 12.5px; }
+.check .label { flex: none; min-width: 116px; color: var(--muted); }
+.check .detail { flex: 1; min-width: 0; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.check .meta { flex: none; font-family: var(--mono); font-size: 11.5px; }
+
+.conn-fields { display: grid; gap: 3px; margin: 6px 0 12px; }
+.conn-field { display: flex; gap: 8px; font-size: 12px; }
+.conn-field .label { flex: none; min-width: 112px; color: var(--muted); }
+
+.conn-actions { display: flex; align-items: center; gap: 8px; margin-top: 10px; }
+.conn-actions input { flex: 1; min-width: 120px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg); padding: 6px 9px; font-family: var(--mono); font-size: 12.5px; }
+
+/* A capability nobody has tested is shown as unknown, which is a different fact from a model that
+   was tested and cannot do it. */
+.flag.unknown { color: var(--muted); }
+.flag.yes { color: var(--ok); }
+
+.flag-editor { display: grid; grid-template-columns: 110px minmax(0, 1fr); gap: 6px 10px; }
+.flag-editor select { width: 100%; }
+
 /* ---------- the chart ---------- */
 
 .chart-box { margin-top: 22px; border-top: 1px solid var(--border); padding-top: 12px; }

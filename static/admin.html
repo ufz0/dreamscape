@@ -66,6 +66,7 @@
         <div class="tabs" role="tablist" aria-label="Admin view">
           <button class="tab on" id="tab-users" role="tab" aria-selected="true">Users</button>
           <button class="tab" id="tab-usage" role="tab" aria-selected="false">Usage</button>
+          <button class="tab" id="tab-connections" role="tab" aria-selected="false">Connections</button>
         </div>
       </header>
 
@@ -78,10 +79,11 @@
           <span class="spacer"></span>
         </div>
 
-        <div class="field">
-          <label for="allow-self-registration">Allow self-registration</label>
-          <input id="allow-self-registration" type="checkbox">
-        </div>
+        <section class="runtime-settings">
+          <h2>Runtime settings</h2>
+          <p class="muted">What the app uses while it is running. A change here applies to the next request.</p>
+          <div class="settings-grid" id="runtime-settings"></div>
+        </section>
 
         <div class="field">
           <label>Search provider</label>
@@ -153,6 +155,14 @@
           <div class="legend" id="chart-legend"></div>
           <p class="muted" id="chart-caption"></p>
         </div>
+      </section>
+      <section class="admin-view" id="connections-view" hidden aria-label="Connections">
+        <div class="admin-toolbar">
+          <button class="small-button" id="add-connection" title="Add an inference connection">Add connection</button>
+          <span class="spacer"></span>
+        </div>
+        <p class="admin-note">The default chat and dreaming models are chosen in Runtime settings on the Users tab.</p>
+        <div id="connection-list"></div>
       </section>
     </main>
   </div>

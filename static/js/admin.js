@@ -1,19 +1,21 @@
-// Admin panel: accounts and their limits, the audit log, and usage numbers for one period.
+// Admin panel: accounts and their limits, the inference connections, and usage numbers for one period.
 // An admin sees counts, never chat content.
 import { api, download, escapeHtml, formatK } from "./api.js";
 import { icon } from "./icons.js";
 import { openMenu, openDialog, toast } from "./ui.js";
-import { startShell } from "./shell.js";
+import { startShell, modelGroups } from "./shell.js";
+import { init as initConnections, load as loadConnections, openAddConnection } from "./connections.js";
 
 const el = (id) => document.getElementById(id);
 const ui = {
-  tabUsers: el("tab-users"), tabUsage: el("tab-usage"), usersView: el("users-view"), usageView: el("usage-view"),
-  status: el("admin-status"), create: el("create-user"), setting: el("allow-self-registration"),
+  tabUsers: el("tab-users"), tabUsage: el("tab-usage"), tabConnections: el("tab-connections"),
+  usersView: el("users-view"), usageView: el("usage-view"), connectionsView: el("connections-view"),
+  status: el("admin-status"), create: el("create-user"), runtimeSettings: el("runtime-settings"),
   userRows: el("user-rows"), auditRows: el("audit-rows"), period: el("period"), periodLabel: el("period-label"),
   prevPeriod: el("prev-period"), nextPeriod: el("next-period"), currentPeriod: el("this-period"),
   totals: el("totals"), usageHead: el("usage-head"), usageRows: el("usage-rows"), filter: el("user-filter"),
   stacked: el("stacked"), export: el("export-csv"), chart: el("chart"), legend: el("chart-legend"), caption: el("chart-caption"),
-  provider: el("search-provider"),
+  provider: el("search-provider"), addConnection: el("add-connection"), connectionList: el("connection-list"),
 };
 
 const PERIODS = [{ key: "day", label: "Day" }, { key: "month", label: "Month" }, { key: "year", label: "Year" }, { key: "all", label: "All time" }];
@@ -27,13 +29,34 @@ const TOTALS = [["Total tokens", "tokens"], ["Prompt", "prompt_tokens"], ["Compl
 const DATE_FORMAT = { year: "numeric", month: "short", day: "2-digit" };
 const TIME_FORMAT = { month: "short", day: "2-digit", hour: "2-digit", minute: "2-digit" };
 
-let accounts = null, usage = null, period = "month", anchor = new Date();
+// Everything an admin can change while the app is running. The settings table is where these live;
+// .env is only what a process needs before it can open the database.
+const SETTINGS_FIELDS = [
+  { key: "allow_self_registration", label: "Allow self-registration", kind: "check", help: "off by default" },
+  { key: "count_dreaming_toward_limits", label: "Count dreaming tokens toward limits", kind: "check", help: "off by default" },
+  { key: "global_daily_limit", label: "Global daily limit", kind: "limit", help: "a user with no value of their own gets this" },
+  { key: "global_weekly_limit", label: "Global weekly limit", kind: "limit", help: "a user with no value of their own gets this" },
+  { key: "default_chat_model", label: "Default chat model", kind: "model", help: "what a new chat uses" },
+  { key: "default_dream_model", label: "Default model for dreaming", kind: "model", help: "may be the same or a different one" },
+  { key: "max_runs_per_user", label: "Runs at one time per account", kind: "number", help: "0 means no maximum" },
+  { key: "max_runs_global", label: "Runs at one time app-wide", kind: "number", help: "0 means no maximum" },
+  { key: "max_run_minutes", label: "Longest a run may go, in minutes", kind: "number", help: "0 means no maximum" },
+  { key: "queue_timeout_seconds", label: "Queue timeout, in seconds", kind: "number", help: "how long a request waits for a slot" },
+];
+
+// Which value a bar or a cell should show, in the same words the app uses when a limit is reached.
+const SOURCE_TEXT = { own: "their own", global: "the global default", unlimited: "set unlimited", none: "no limit" };
+
+let accounts = null, usage = null, runtime = null, period = "month", anchor = new Date();
 let filterUser = null, stacked = false, sort = { key: "tokens", desc: true }, headers = [];
+
+const VIEWS = [[ui.tabUsers, "users"], [ui.tabUsage, "usage"], [ui.tabConnections, "connections"]];
 
 function showView(which) {
   ui.usersView.hidden = which !== "users";
   ui.usageView.hidden = which !== "usage";
-  for (const [tab, name] of [[ui.tabUsers, "users"], [ui.tabUsage, "usage"]]) {
+  ui.connectionsView.hidden = which !== "connections";
+  for (const [tab, name] of VIEWS) {
     tab.classList.toggle("on", name === which);
     tab.setAttribute("aria-selected", String(name === which));
   }
@@ -48,9 +71,92 @@ async function loadUsers() {
     say(`Cannot read the accounts: ${error.message}`, true);
     return;
   }
-  ui.setting.checked = Boolean(accounts.settings.allow_self_registration);
   renderUsers();
   renderAudit();
+  await loadRuntime();
+}
+
+// ---------- runtime settings ----------
+
+async function loadRuntime() {
+  try {
+    runtime = (await api("/api/admin/settings")).settings;
+  } catch (error) {
+    say(`Cannot read the settings: ${error.message}`, true);
+    return;
+  }
+  await renderRuntime();
+}
+
+async function renderRuntime() {
+  const groups = await modelGroups().catch(() => []);
+  ui.runtimeSettings.innerHTML = "";
+
+  for (const field of SETTINGS_FIELDS) {
+    const value = runtime[field.key];
+    const row = document.createElement("div");
+    row.className = "field";
+
+    const label = document.createElement("label");
+    label.textContent = field.label;
+    row.append(label);
+
+    let control;
+    if (field.kind === "check") {
+      control = document.createElement("input");
+      control.type = "checkbox";
+      control.checked = Boolean(value);
+    } else if (field.kind === "model") {
+      control = document.createElement("select");
+      const inherit = document.createElement("option");
+      inherit.value = "";
+      inherit.textContent = value ? value : "not set — the first visible model";
+      inherit.selected = true;
+      control.append(inherit);
+      for (const group of groups) {
+        const block = document.createElement("optgroup");
+        block.label = group.connection.name;
+        for (const model of group.models) {
+          const option = document.createElement("option");
+          option.value = model.namespaced;
+          option.textContent = model.display_name;
+          option.selected = model.namespaced === value;
+          block.append(option);
+        }
+        control.append(block);
+      }
+    } else {
+      control = document.createElement("input");
+      control.type = "text";
+      control.value = value === 0 && field.kind === "limit" ? "" : String(value);
+      control.placeholder = field.kind === "limit" ? "no limit" : "0";
+      control.classList.add("value");
+    }
+
+    control.setAttribute("aria-label", field.label);
+    control.addEventListener("change", () => saveSetting(field, control));
+    row.append(control);
+
+    if (field.help) row.append(Object.assign(document.createElement("span"), { className: "help", textContent: field.help }));
+    ui.runtimeSettings.append(row);
+  }
+}
+
+async function saveSetting(field, control) {
+  const value = field.kind === "check" ? control.checked
+    : field.kind === "limit" ? parseLimit(control.value) : control.value;
+  if (value === null) { say("A limit has to be a number, 100k / 1.5m, unlimited, or empty.", true); return; }
+
+  try {
+    const result = await api("/api/admin/settings", { method: "POST", body: JSON.stringify({ key: field.key, value }) });
+    runtime = result.settings;
+    say(`Saved ${field.label.toLowerCase()}.`);
+    await renderRuntime();
+    if (field.key.startsWith("global_")) {
+      if (accounts) renderUsers();
+      if (usage) renderUsageTable();
+    }
+  } catch (error) { say(`Could not save that: ${error.message}`, true); }
 }
 
 // Read-only: which provider the app is actually using. Nothing here changes .env.
@@ -127,7 +233,7 @@ async function setField(user, field, value) {
 
 async function saveLimit(user, window, input, result) {
   const value = parseLimit(input.value);
-  if (value === null) { showResult(result, "a number, 100k / 1.5m, or empty", "error"); return; }
+  if (value === null) { showResult(result, "a number, 100k / 1.5m, unlimited, or empty", "error"); return; }
   try {
     // The limits endpoint writes both windows, so the other one is sent as it is now.
     const other = window === "daily" ? "weekly" : "daily";
@@ -136,8 +242,9 @@ async function saveLimit(user, window, input, result) {
       body: JSON.stringify({ [`${window}_limit`]: value, [`${other}_limit`]: user[`${other}_limit`] || 0 }),
     });
     Object.assign(user, saved.user || {});
-    input.value = user[`${window}_limit`] ? String(user[`${window}_limit`]) : "";
+    input.value = displayLimit(user[`${window}_limit`]);
     showResult(result, "saved", "saved");
+    renderUsers();          // the effective limit next to it may have changed
     if (usage) renderUsageTable();
   } catch (error) { showResult(result, error.message, "error"); }
 }
@@ -191,14 +298,14 @@ function openCreateUser() {
     const name = field("Username", "");
     const password = field("Temporary password", "");
     const role = selectField("Role", ["user", "admin"]);
-    const daily = field("Daily limit", "empty = no limit");
-    const weekly = field("Weekly limit", "empty = no limit");
+    const daily = field("Daily limit", "empty = the global default");
+    const weekly = field("Weekly limit", "empty = the global default");
     const status = paragraph("");
     password.value = tempPassword();
 
     const create = button("Create user", async () => {
       const limits = [parseLimit(daily.value), parseLimit(weekly.value)];
-      if (limits.some((value) => value === null)) { status.textContent = "Limits must be a number, 100k / 1.5m, or empty."; return; }
+      if (limits.some((value) => value === null)) { status.textContent = "Limits must be a number, 100k / 1.5m, unlimited, or empty."; return; }
       create.disabled = true;
       status.textContent = "Creating…";
       try {
@@ -439,8 +546,8 @@ function buildControls() {
   ui.filter.addEventListener("change", () => setFilter(ui.filter.value || null));
   ui.export.addEventListener("click", exportCsv);
   ui.create.addEventListener("click", openCreateUser);
-  ui.tabUsers.addEventListener("click", () => showView("users"));
-  ui.tabUsage.addEventListener("click", () => showView("usage"));
+  ui.addConnection.addEventListener("click", () => openAddConnection());
+  for (const [tab, name] of VIEWS) tab.addEventListener("click", () => showView(name));
 
   // Table bodies are redrawn as strings, so their buttons and inputs are handled from the body itself.
   ui.userRows.addEventListener("click", (event) => {
@@ -460,19 +567,6 @@ function buildControls() {
     stacked = !stacked;
     ui.stacked.setAttribute("aria-pressed", String(stacked));
     renderChart();
-  });
-
-  ui.setting.addEventListener("change", async () => {
-    const value = ui.setting.checked;
-    try {
-      const result = await api("/api/admin/settings", { method: "POST", body: JSON.stringify({ key: "allow_self_registration", value }) });
-      accounts.settings = result.settings;
-      ui.setting.checked = Boolean(result.settings.allow_self_registration);
-      say(`Self-registration is ${result.settings.allow_self_registration ? "on" : "off"}.`);
-    } catch (error) {
-      ui.setting.checked = Boolean(accounts.settings.allow_self_registration);
-      say(`Could not save that: ${error.message}`, true);
-    }
   });
 }
 
@@ -510,18 +604,28 @@ function valueCell(row, key = "tokens") {
   return `<span class="value" title="${escapeHtml(title)}">${escapeHtml(formatK(row[key]))}${row.estimated ? " ~" : ""}</span>`;
 }
 
+// The value a user set, and the one that applies. They are not the same thing: an empty value
+// inherits the global default, and -1 is the one value that says this account is not capped.
 function limitCell(user, window) {
-  const value = user[`${window}_limit`] || 0;
-  return `<div class="limit"><input type="text" data-limit="${window}" data-id="${user.id}" value="${value ? value : ""}"` +
-    ` placeholder="no limit" aria-label="${window} limit for ${escapeHtml(user.username)}"><span class="result"></span></div>`;
+  const own = user[`${window}_limit`] || 0;
+  const applies = (user.effective || {})[window] || { limit: 0, source: "none" };
+  const shown = applies.source === "unlimited" ? "unlimited"
+    : applies.limit ? formatK(applies.limit) : "no limit";
+  const input = `<input type="text" data-limit="${window}" data-id="${user.id}" value="${own ? String(own) : ""}"` +
+    ` placeholder="inherit" aria-label="${window} limit for ${escapeHtml(user.username)}">`;
+
+  return `<div class="limit">${input}<span class="result"></span></div>` +
+    `<p class="effective" title="${escapeHtml(`${applies.limit} tokens, from ${SOURCE_TEXT[applies.source]}`)}">` +
+    `${escapeHtml(shown)} · ${escapeHtml(SOURCE_TEXT[applies.source])}</p>`;
 }
 
 function windowCell(row, window) {
-  const current = (row.current || {})[window] || { limit: 0, used: 0 };
+  const current = (row.current || {})[window] || { limit: 0, used: 0, source: "none" };
   if (!current.limit) return `<span class="value">no limit</span>`;
   const percent = Math.round((current.used / current.limit) * 100);
   const tone = percent >= 100 ? " over" : percent >= 80 ? " high" : "";
-  return `<div class="window"><span class="value" title="${current.used} of ${current.limit} in the current ${window} window">` +
+  // The bar is against the limit that applies, so say whose limit it is.
+  return `<div class="window"><span class="value" title="${current.used} of ${current.limit} in the current ${window} window, from ${SOURCE_TEXT[current.source] || "their own"}">` +
     `${escapeHtml(formatK(current.used))} (${percent}%)</span>` +
     `<span class="usage-bar"><span class="fill${tone}" style="width:${Math.min(100, percent)}%"></span></span></div>`;
 }
@@ -567,14 +671,25 @@ function selectField(labelText, options) {
   return select;
 }
 
-// Same rule as the server: empty or 0 means no limit, 100k and 1.5m are accepted. null is not a limit.
+// Same rule as the server: empty or 0 means inherit the global default, "unlimited" (or a negative)
+// means this account is not capped whatever the default is, and 100k / 1.5m are accepted.
 function parseLimit(text) {
   const value = String(text || "").trim().toLowerCase().replace(/,/g, "");
   if (!value) return 0;
-  const multiplier = value.endsWith("k") ? 1000 : value.endsWith("m") ? 1000000 : 1;
-  const number = Number(value.replace(/[km]$/, ""));
-  if (!Number.isFinite(number) || number < 0) return null;
-  return Math.round(number * multiplier);
+  if (value === "unlimited" || value === "inf" || value === "∞") return -1;
+  const negative = value.startsWith("-");
+  const clean = value.replace(/^-/, "");
+  const multiplier = clean.endsWith("k") ? 1000 : clean.endsWith("m") ? 1000000 : 1;
+  const number = Number(clean.replace(/[km]$/, ""));
+  if (!Number.isFinite(number)) return null;
+  const result = Math.round(number * multiplier);
+  return negative && result ? -1 : result;
+}
+
+// How a stored limit is written in a field: -1 is the word, not the number.
+function displayLimit(value) {
+  if (value === -1) return "unlimited";
+  return value ? String(value) : "";
 }
 
 // A temporary password only has to be readable, since it is replaced at the first login.
@@ -590,7 +705,9 @@ buildUsageHead();
 
 // startShell paints the icons, sets the theme, and goes to /login when there is no session.
 startShell({}).then(() => {
+  initConnections(say, ui.connectionList);
   loadUsers();
   loadUsage();
   loadProvider();
+  loadConnections();
 });
