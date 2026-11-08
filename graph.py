@@ -8,24 +8,28 @@ pages exist, since a link cannot exist before either page does.
 import subprocess
 from datetime import datetime, timezone
 
+import appdata
 import config
 import wiki
 
+# Keyed per user, so one user's graph is never served to another.
 CACHE = {"key": None, "data": None}
 SKIP = ("index", "dream-log")
 
 
 def git(*args) -> str:
-    if not (config.WIKI / ".git").exists():
+    folder = wiki.wiki_dir()
+    if not (folder / ".git").exists():
         return ""
-    result = subprocess.run(["git", *args], cwd=config.WIKI, capture_output=True, text=True)
+    result = subprocess.run(["git", *args], cwd=folder, capture_output=True, text=True)
     return result.stdout.strip() if result.returncode == 0 else ""
 
 
 def cache_key() -> tuple:
-    files = [p for p in config.WIKI.glob("*.md") if p.stem not in SKIP]
+    folder = wiki.wiki_dir()
+    files = [p for p in folder.glob("*.md") if p.stem not in SKIP]
     newest = max((p.stat().st_mtime_ns for p in files), default=0)
-    return (len(files), newest, git("rev-parse", "--short", "HEAD"))
+    return (str(appdata.current().base), len(files), newest, git("rev-parse", "--short", "HEAD"))
 
 
 def archive() -> list[dict]:
@@ -65,7 +69,7 @@ def build() -> dict:
     if CACHE["key"] == key and CACHE["data"] is not None:
         return CACHE["data"]
 
-    config.ensure_dirs()
+    appdata.current().ensure()
     commits = archive()
     first, last = {}, {}
     for commit in commits:
@@ -74,7 +78,7 @@ def build() -> dict:
             last[slug] = commit["date"]
     latest = len(commits) - 1 if commits else 0
 
-    pages = sorted(p for p in config.WIKI.glob("*.md") if p.stem not in SKIP)
+    pages = sorted(p for p in wiki.wiki_dir().glob("*.md") if p.stem not in SKIP)
     nodes = {}
     for path in pages:
         slug = path.stem

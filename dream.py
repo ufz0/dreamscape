@@ -3,10 +3,14 @@
 Run manually with `python dream.py`, or from cron at 03:00.
   --dry-run  show what would be processed, write nothing
   --now      ignore the idle rule
+  --user     run for one user only; without it every active user is processed in turn
   --trigger  what started the run: manual (default), cron, button. DREAM_TRIGGER does the same.
 
-Each run writes a structured record to data/dream-runs/ (see dreamlog.py) and appends a short
-human-readable summary to the wiki's dream-log.md.
+Each run writes a structured record to that user's data/users/<id>/dream-runs/ (see dreamlog.py)
+and appends a short human-readable summary to the user's dream-log.md. Every upstream call is
+recorded in the usage table with source="dreaming".
+
+One process, one global lockfile: the job never runs twice at the same time.
 """
 import argparse
 import asyncio
@@ -16,11 +20,15 @@ import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 
+import accounts
 import agent
+import appdata
 import config
+import db
 import dreamlog
 import reasoning
 import store
+import usage
 import wiki
 
 
@@ -97,7 +105,8 @@ def format_findings(checks: dict) -> str:
 STEP_NAMES = {"wiki_read": "read", "wiki_search": "search", "wiki_list": "read", "wiki_write": "write"}
 
 
-async def ask(prompt: str, model: str, level: str = "per_transcript", on_step=None) -> dict:
+async def ask(prompt: str, model: str, level: str = "per_transcript", on_step=None, user=None,
+             on_usage=None) -> dict:
     """One model turn with wiki tools.
 
     The dreaming job has its own effort levels in data/reasoning.json (medium for transcripts,
@@ -111,12 +120,15 @@ async def ask(prompt: str, model: str, level: str = "per_transcript", on_step=No
     mapping = reasoning.resolve(model, levels.get(level, levels.get("per_transcript", "medium")))
     changes = []
     final = ""
-    usage = {}
-    async for event in agent.run_loop([{"role": "system", "content": prompt}], model, 0.2, mapping=mapping):
+    usage_block = {}
+    async for event in agent.run_loop([{"role": "system", "content": prompt}], model, 0.2, mapping=mapping,
+                                      on_usage=lambda block, estimated: record_usage(user, block, model, estimated,
+                                                                                   on_usage)):
         if event["type"] == "assistant_message" and not event["tool_calls"]:
             final = event["content"]
         elif event["type"] == "usage":
-            usage.update(event.get("usage") or {})
+            usage_block = usage_block or {}
+            usage_block.update(event.get("usage") or {})
         elif event["type"] == "tool":
             result = event["result"]
             if event["name"] == "wiki_write" and not result.get("error"):
@@ -127,15 +139,25 @@ async def ask(prompt: str, model: str, level: str = "per_transcript", on_step=No
                                 "index_entry_added": result.get("index_entry_added")})
             if on_step:
                 on_step(event)
-    return {"answer": final.strip(), "changes": changes, "usage": usage, "level": mapping["level"]}
+    return {"answer": final.strip(), "changes": changes, "usage": usage_block, "level": mapping["level"]}
+
+
+def record_usage(user, block: dict, model: str, estimated: bool, on_usage=None) -> None:
+    """One upstream call, recorded as it happened, plus the running total for the run record."""
+    if user is None:
+        return
+    with db.transaction() as conn:
+        usage.record(conn, user["id"], block, "dreaming", model, None, estimated)
+    if on_usage:
+        on_usage(block, estimated)
 
 
 def git(*args) -> subprocess.CompletedProcess:
-    return subprocess.run(["git", *args], cwd=config.WIKI, capture_output=True, text=True)
+    return subprocess.run(["git", *args], cwd=wiki.wiki_dir(), capture_output=True, text=True)
 
 
 def commit(message: str) -> str | None:
-    if not (config.WIKI / ".git").exists():
+    if not (wiki.wiki_dir() / ".git").exists():
         git("init", "-q")
     git("add", "-A")
     if git("diff", "--cached", "--quiet").returncode == 0:
@@ -176,26 +198,32 @@ def record_tool_step(record: dict, target: list, event: dict, snapshot: dict, gr
         step["action"] = "created" if result.get("created") else (
             "merged" if event["arguments"].get("mode") == "append" else "updated")
         step["index_entry_added"] = bool(result.get("index_entry_added"))
-        new = (config.WIKI / f"{slug}.md").read_text(encoding="utf-8")
+        new = (wiki.wiki_dir() / f"{slug}.md").read_text(encoding="utf-8")
         step.update(dreamlog.unified_diff(snapshot.get(slug, ""), new, slug))
         snapshot[slug] = new
     dreamlog.add_step(record, target, step)
-    dreamlog.emit({"type": "step", "id": record["id"], "phase": group, "transcript": group, "step": step})
+    dreamlog.emit({"type": "step", "user": str(record.get("user") or ""), "id": record["id"], "phase": group, "transcript": group, "step": step})
 
 
-async def run(trigger: str = "", dry_run: bool = False, force: bool = False,
-             include_reasoning: bool = False) -> dict:
-    config.ensure_dirs()
+async def run_user(user: dict, trigger: str = "", dry_run: bool = False, force: bool = False,
+                   include_reasoning: bool = False) -> dict:
+    """One dreaming run for one user. Called from run(), which sets the current user."""
+    paths = appdata.current()
+    paths.ensure()
     model = config.MODEL
     files = store.idle_transcripts(0 if force or dry_run else config.IDLE_MINUTES)
     levels = reasoning.settings().get("dream", {})
     record = dreamlog.build_record(trigger or config.env("DREAM_TRIGGER", "manual"), model,
                                   {"per_transcript": levels.get("per_transcript", "medium"),
-                                   "cleanup": levels.get("cleanup", "high")})
+                                   "cleanup": levels.get("cleanup", "high")}, user)
     report = record
 
     def note(message: str) -> None:
         report["note"] = message
+
+    def count_usage(block: dict, estimated: bool) -> None:
+        # Every upstream call is one usage row; the run record keeps its own total as before.
+        report["usage"] = dreamlog.add_usage(report["usage"], block)
 
     if not files:
         record["status"] = "success"
@@ -213,14 +241,15 @@ async def run(trigger: str = "", dry_run: bool = False, force: bool = False,
         note("dry run: would process these transcripts, wrote nothing")
         return report
 
-    acquire_lock()
     dreamlog.save(record)
-    dreamlog.emit({"type": "start", "id": record["id"], "transcripts": len(files)})
+    dreamlog.emit({"type": "start", "id": record["id"], "user": str(user["id"]), "transcripts": len(files)},
+                  str(user["id"]))
 
     snapshot = {}
-    for path in sorted(config.WIKI.glob("*.md")):
+    for path in sorted(paths.wiki.glob("*.md")):
         snapshot[path.stem] = path.read_text(encoding="utf-8")
     checks_before = wiki.checks()
+
 
     processed = []
     try:
@@ -230,7 +259,8 @@ async def run(trigger: str = "", dry_run: bool = False, force: bool = False,
                                           "note": "", "steps": [], "attempts": 0})
             item = record["transcripts"][-1]
             dreamlog.emit({"type": "transcript", "id": record["id"], "file": path.name,
-                           "position": len(record["transcripts"]), "total": len(files), "phase": path.name})
+                           "position": len(record["transcripts"]), "total": len(files), "phase": path.name},
+                          str(user["id"]))
             prompt = config.read_prompt("dream_per_transcript.md", index=wiki.index_text(),
                                        source=path.name, transcript=render_transcript(path, include_reasoning))
             for attempt in range(1, RETRIES + 2):
@@ -238,26 +268,26 @@ async def run(trigger: str = "", dry_run: bool = False, force: bool = False,
                 try:
                     result = await ask(prompt, model, "per_transcript",
                                       on_step=lambda event: record_tool_step(record, item["steps"], event, snapshot,
-                                                                           path.name))
+                                                                           path.name),
+                                      user=user, on_usage=count_usage)
                 except Exception as error:
                     step = {"type": "error", "summary": str(error), "attempt": attempt}
                     record["errors"].append({"message": str(error), "attempt": attempt, "at": dreamlog.now(),
                                             "transcript": path.name})
                     dreamlog.add_step(record, item["steps"], step)
                     dreamlog.emit({"type": "error", "id": record["id"], "phase": path.name,
-                                   "transcript": path.name, "message": str(error), "attempt": attempt})
+                                   "transcript": path.name, "message": str(error), "attempt": attempt},
+                                  str(user["id"]))
                     if attempt <= RETRIES:
                         continue
                     record["status"] = "partial"
                     break
                 item["note"] = result["answer"]
-                if result["usage"]:
-                    report["usage"] = dreamlog.add_usage(report["usage"], result["usage"])
                 processed.append((path, item))
                 dreamlog.emit({"type": "transcript", "id": record["id"], "phase": path.name,
                                "file": path.name, "transcript": path.name,
                                "position": len(record["transcripts"]), "total": len(files),
-                               "note": item["note"]})
+                               "note": item["note"]}, str(user["id"]))
                 print(f"dream: {path.name} -> {item['note'].splitlines()[0] if item['note'] else 'no answer'}")
                 break
 
@@ -270,7 +300,8 @@ async def run(trigger: str = "", dry_run: bool = False, force: bool = False,
                                                    findings=format_findings(findings_before),
                                                    index_limit=config.INDEX_MAX_LINES),
                                model, "cleanup",
-                               on_step=lambda event: record_tool_step(record, record["cleanup"]["steps"], event, snapshot, "cleanup"))
+                               on_step=lambda event: record_tool_step(record, record["cleanup"]["steps"], event, snapshot, "cleanup"),
+                               user=user, on_usage=count_usage)
             record["cleanup"]["note"] = cleanup["answer"]
         except Exception as error:
             record["status"] = "partial"
@@ -278,7 +309,7 @@ async def run(trigger: str = "", dry_run: bool = False, force: bool = False,
                                     "transcript": None})
             record["cleanup"]["steps"].append({"type": "error", "summary": str(error), "at": dreamlog.now()})
             dreamlog.emit({"type": "error", "id": record["id"], "phase": "cleanup",
-                           "message": str(error), "attempt": 1})
+                           "message": str(error), "attempt": 1}, str(user["id"]))
 
         findings_after = wiki.checks()
         record["cleanup"]["findings_after"] = findings_after
@@ -292,7 +323,7 @@ async def run(trigger: str = "", dry_run: bool = False, force: bool = False,
 
         # The end of the run: only what was processed successfully is moved out of the inbox.
         for path, item in processed:
-            path.rename(config.PROCESSED / path.name)
+            path.rename(paths.processed / path.name)
 
         summary_lines = [f"## {record['started'][:10]} {record['started'][11:16]} ({len(files)} transcripts)", ""]
         for item in record["transcripts"]:
@@ -302,7 +333,7 @@ async def run(trigger: str = "", dry_run: bool = False, force: bool = False,
         summary_lines.append("")
         summary_lines.append(f"Cleanup: {record['cleanup']['note'] or 'no answer'}")
 
-        log_path = config.WIKI / "dream-log.md"
+        log_path = paths.wiki / "dream-log.md"
         if not log_path.exists():
             log_path.write_text("# Dream log\n", encoding="utf-8")
         with open(log_path, "a", encoding="utf-8") as handle:
@@ -329,41 +360,83 @@ async def run(trigger: str = "", dry_run: bool = False, force: bool = False,
             (datetime.fromisoformat(record["finished"].replace("Z", "+00:00"))
              - datetime.fromisoformat(record["started"].replace("Z", "+00:00"))).total_seconds())
         dreamlog.save(record)
-        dreamlog.emit({"type": "finished", "id": record["id"], "status": record["status"],
+        dreamlog.emit({"type": "finished", "id": record["id"], "user": str(user["id"]), "status": record["status"],
                        "commit": report["commit"], "note": report["note"] or "",
-                       "counts": record["counts"]})
-        release_lock()
+                       "counts": record["counts"]}, str(user["id"]))
     return report
+
+
+async def run(trigger: str = "", dry_run: bool = False, force: bool = False,
+             include_reasoning: bool = False, user: dict | None = None) -> dict:
+    """Dream for one user when given, otherwise for every active user in turn.
+
+    One process, one lockfile: the whole batch holds the lock, so the cron job and the UI button
+    never overlap. Returns that user's record when a user is given, otherwise the list of records.
+    """
+    config.ensure_dirs()
+    with db.transaction() as conn:
+        rows = conn.execute("SELECT id FROM users WHERE status = 'active' ORDER BY username").fetchall()
+        users = [user] if user else [accounts.get_user(conn, row["id"]) for row in rows]
+    if not users:
+        return {"status": "skipped", "note": "no accounts yet", "records": []}
+
+    acquire_lock()
+    records = []
+    try:
+        for entry in users:
+            appdata.set_current(entry["id"])
+            records.append(await run_user(entry, trigger, dry_run, force, include_reasoning))
+    finally:
+        release_lock()
+    if user:
+        return records[0]
+    return {"status": "success", "records": records,
+            "note": "; ".join(f"{record['username']}: {record['note'] or record['status']}" for record in records)}
+
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="nightly dreaming job")
     parser.add_argument("--dry-run", action="store_true", help="show what would be processed, write nothing")
     parser.add_argument("--now", action="store_true", help="ignore the idle rule")
+    parser.add_argument("--user", default="", help="run for this username only")
     parser.add_argument("--include-reasoning", action="store_true",
                         help="pass thinking to the model as well (off by default)")
     parser.add_argument("--trigger", default="", help="what started the run: manual, cron, button")
     args = parser.parse_args()
+
+    user = None
+    if args.user:
+        with db.transaction() as conn:
+            user = accounts.get_by_username(conn, args.user)
+        if user is None:
+            print(f"dream: no such user: {args.user}")
+            return 1
+
     try:
         result = asyncio.run(run(trigger=args.trigger, dry_run=args.dry_run, force=args.now,
-                                include_reasoning=args.include_reasoning))
+                                 include_reasoning=args.include_reasoning, user=user))
     except Locked as error:
         print(f"dream: {error}")
         return 1
-    print(f"dream run ({'dry' if args.dry_run else 'live'}) at {result['started']}")
-    if not result["transcripts"]:
-        print(result["note"])
-        return 0
-    for item in result["transcripts"]:
-        print(f"  {item['file']} ({item['messages']} messages)")
-        if item.get("note"):
-            print(f"    {item['note']}")
-        for step in item.get("steps") or []:
-            if step["type"] == "write":
-                print(f"    {step['page']} [{step['action']}] {step.get('summary', '')}")
-    if result["cleanup"]["note"]:
-        print(f"  cleanup: {result['cleanup']['note']}")
-    print(result["note"] or (f"  committed {result['commit']}" if result["commit"] else "  no changes to commit"))
+
+    records = [result] if not result.get("records") else result["records"]
+    for record in records:
+        print(f"dream run ({'dry' if record.get('dry_run') else 'live'}) at {record['started']} "
+              f"for {record.get('username') or 'the first account'}")
+        if not record["transcripts"]:
+            print(record["note"])
+            continue
+        for item in record["transcripts"]:
+            print(f"  {item['file']} ({item['messages']} messages)")
+            if item.get("note"):
+                print(f"    {item['note']}")
+            for step in item.get("steps") or []:
+                if step["type"] == "write":
+                    print(f"    {step['page']} [{step['action']}] {step.get('summary', '')}")
+        if record["cleanup"]["note"]:
+            print(f"  cleanup: {record['cleanup']['note']}")
+        print(record["note"] or (f"  committed {record['commit']}" if record["commit"] else "  no changes to commit"))
     return 0
 
 

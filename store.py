@@ -1,4 +1,8 @@
-"""Transcripts (JSONL, append-only) and the conversation index."""
+"""Transcripts (JSONL, append-only) and the conversation index.
+
+Everything here belongs to the current user: the index and the transcript folders come from
+appdata.current(), which is set per request (auth.py) or per user in the dreaming loop.
+"""
 import json
 import re
 import time
@@ -6,10 +10,14 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
+import appdata
 import config
 
-INDEX_FILE = config.DATA_DIR / "conversations.json"
 TITLE_MAX = 60
+
+
+def paths() -> appdata.Paths:
+    return appdata.current()
 
 
 def now() -> str:
@@ -17,24 +25,25 @@ def now() -> str:
 
 
 def load_index() -> list[dict]:
-    if INDEX_FILE.exists():
+    file = paths().conversations
+    if file.exists():
         try:
-            return json.loads(INDEX_FILE.read_text(encoding="utf-8"))
+            return json.loads(file.read_text(encoding="utf-8"))
         except json.JSONDecodeError:
             return []
     return []
 
 
 def save_index(rows: list[dict]) -> None:
-    INDEX_FILE.write_text(json.dumps(rows, indent=2) + "\n", encoding="utf-8")
+    paths().conversations.write_text(json.dumps(rows, indent=2) + "\n", encoding="utf-8")
 
 
 def new_conversation(model: str, system: str) -> dict:
-    config.ensure_dirs()
+    paths().ensure()
     cid = short_id()
     row = {
         "id": cid,
-        "file": str(config.INBOX / f"{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}-{cid}.jsonl"),
+        "file": str(paths().inbox / f"{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}-{cid}.jsonl"),
         "model": model,
         "system": system,
         "created": now(),
@@ -51,7 +60,7 @@ def short_id() -> str:
 def path_for(row: dict) -> Path:
     """Transcripts move from inbox/ to processed/ during a dream run, so resolve both."""
     name = Path(row["file"]).name
-    for folder in (config.INBOX, config.PROCESSED):
+    for folder in (paths().inbox, paths().processed):
         path = folder / name
         if path.exists():
             return path
@@ -161,7 +170,7 @@ def list_conversations() -> list[dict]:
         path = path_for(row)
         if not path.exists():
             continue
-        rows.append({**row, "title": title_for(row), "processed": str(path).startswith(str(config.PROCESSED)),
+        rows.append({**row, "title": title_for(row), "processed": str(path).startswith(str(paths().processed)),
                      "messages": len(path.read_text(encoding="utf-8").splitlines()),
                      "updated": datetime.fromtimestamp(path.stat().st_mtime, timezone.utc).isoformat(timespec="seconds")})
     return sorted(rows, key=lambda r: r["updated"], reverse=True)
@@ -170,7 +179,7 @@ def list_conversations() -> list[dict]:
 def idle_transcripts(minutes: int) -> list[dict]:
     cutoff = time.time() - minutes * 60
     found = []
-    for path in sorted(config.INBOX.glob("*.jsonl")):
+    for path in sorted(paths().inbox.glob("*.jsonl")):
         if path.stat().st_size == 0:
             continue
         if path.stat().st_mtime <= cutoff:

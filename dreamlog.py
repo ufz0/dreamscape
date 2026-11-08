@@ -21,16 +21,21 @@ import re
 from datetime import datetime, timezone
 from pathlib import Path
 
+import appdata
 import config
 
-RUNS = config.DATA_DIR / "dream-runs"
 RESULT_MAX_CHARS = 200
 DIFF_MAX_CHARS = config.env_int("DREAM_DIFF_MAX_CHARS", 4000)
 
-SUBSCRIBERS: set[asyncio.Queue] = set()
-ACTIVE = {"id": None}          # the run in progress, so a late listener can catch up
+# Subscribers are per user, so a live run is only shown to the user it belongs to.
+SUBSCRIBERS: dict[asyncio.Queue, str] = {}
+ACTIVE: dict[str, str | None] = {}      # user id -> the run in progress, so a late listener can catch up
 
 STEP_TYPES = ("read", "search", "write", "fix", "error", "note")
+
+
+def runs_dir() -> Path:
+    return appdata.current().runs
 
 
 def now() -> str:
@@ -41,7 +46,7 @@ def run_id() -> str:
     return datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
 
 
-def build_record(trigger: str, model: str, levels: dict) -> dict:
+def build_record(trigger: str, model: str, levels: dict, user: dict | None = None) -> dict:
     return {
         "id": run_id(),
         "started": now(),
@@ -50,6 +55,8 @@ def build_record(trigger: str, model: str, levels: dict) -> dict:
         "trigger": trigger,
         "status": "running",
         "model": model,
+        "user": str(user["id"]) if user else "",
+        "username": user["username"] if user else "",
         "reasoning_effort": levels,
         "usage": None,
         "commit": None,
@@ -125,17 +132,17 @@ def summary(result: dict) -> str:
 
 
 def save(record: dict) -> None:
-    RUNS.mkdir(parents=True, exist_ok=True)
-    (RUNS / f"{record['id']}.json").write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
-    ACTIVE["id"] = record["id"] if record["status"] == "running" else None
+    runs_dir().mkdir(parents=True, exist_ok=True)
+    (runs_dir() / f"{record['id']}.json").write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
+    ACTIVE[str(record.get("user") or "")] = record["id"] if record["status"] == "running" else None
 
 
-async def stream():
+async def stream(user: str = ""):
     """Events for one listener: the current state first, then whatever happens while it listens."""
-    queue = subscribe()
+    queue = subscribe(user)
     try:
-        yield {"type": "state", "running": ACTIVE["id"] is not None,
-               "run": get_run(ACTIVE["id"]) if ACTIVE["id"] else None}
+        active = ACTIVE.get(user)
+        yield {"type": "state", "running": active is not None, "run": get_run(active) if active else None}
         while True:
             try:
                 yield await asyncio.wait_for(queue.get(), timeout=25)
@@ -145,29 +152,33 @@ async def stream():
         unsubscribe(queue)
 
 
-def emit(event: dict) -> None:
-    for queue in list(SUBSCRIBERS):
+def emit(event: dict, user: str = "") -> None:
+    target = str(event.get("user") or user)
+    for queue, owner in list(SUBSCRIBERS.items()):
+        if owner and owner != target:
+            continue
         try:
             queue.put_nowait(event)
         except Exception:
             pass
 
 
-def subscribe() -> asyncio.Queue:
+def subscribe(user: str = "") -> asyncio.Queue:
     queue = asyncio.Queue()
-    SUBSCRIBERS.add(queue)
+    SUBSCRIBERS[queue] = str(user or "")
     return queue
 
 
 def unsubscribe(queue: asyncio.Queue) -> None:
-    SUBSCRIBERS.discard(queue)
+    SUBSCRIBERS.pop(queue, None)
 
 
 def list_runs() -> list[dict]:
-    """Run summaries, newest first: the list the left column shows."""
+    """Run summaries for the current user, newest first: the list the left column shows."""
     runs = []
-    if RUNS.is_dir():
-        for path in sorted(RUNS.glob("*.json"), reverse=True):
+    folder = runs_dir()
+    if folder.is_dir():
+        for path in sorted(folder.glob("*.json"), reverse=True):
             try:
                 record = json.loads(path.read_text(encoding="utf-8"))
             except (json.JSONDecodeError, OSError):
@@ -194,7 +205,7 @@ def get_run(run_id: str) -> dict | None:
             if run["id"] == run_id:
                 return run
         return None
-    path = RUNS / f"{run_id}.json"
+    path = runs_dir() / f"{run_id}.json"
     if not path.is_file():
         return None
     try:
@@ -212,7 +223,7 @@ def legacy_runs() -> list[dict]:
       Mechanical checks before cleanup: ...
       Cleanup: ...
     """
-    log = config.WIKI / "dream-log.md"
+    log = appdata.current().wiki / "dream-log.md"
     if not log.is_file():
         return []
     runs = []
