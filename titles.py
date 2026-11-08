@@ -37,7 +37,8 @@ def first_exchange(cid: str) -> str:
     return "\n".join(parts)
 
 
-async def generate(user: dict, cid: str, model: str) -> dict:
+async def generate(user: dict, cid: str, model: str, target: dict | None = None,
+                   connection_id: int | None = None) -> dict:
     """{"title", "generated", "note"}. The title is always something the UI can show."""
     row = store.get(cid)
     if row is None:
@@ -61,8 +62,9 @@ async def generate(user: dict, cid: str, model: str) -> dict:
     body = dict(reasoning.resolve(model, "none").get("body") or {})
     body.setdefault("max_tokens", 40)
     try:
-        result = await llm.complete([{"role": "system", "content": prompt},
-                                    {"role": "user", "content": text}], model, 0.3, extra_body=body)
+        result = await llm.complete(target or llm.default_target(), model,
+                                   [{"role": "system", "content": prompt},
+                                    {"role": "user", "content": text}], 0.3, extra_body=body)
     except Exception as error:
         return {"title": store.title_for(row), "generated": False, "note": f"Could not ask the model: {error}"}
 
@@ -70,7 +72,8 @@ async def generate(user: dict, cid: str, model: str) -> dict:
     block = reported or usagelog.estimate([{"role": "system", "content": prompt},
                                           {"role": "user", "content": text}], result.get("text") or "")
     with db.transaction() as conn:
-        usagelog.record(conn, user["id"], block, "chat", model, cid, not reported)
+        usagelog.record(conn, user["id"], block, "chat", model, cid, not reported,
+                       connection_id=connection_id)
 
     title = clean(result.get("text") or "")
     if not title:

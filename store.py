@@ -95,6 +95,34 @@ def append(cid: str, record: dict) -> None:
         handle.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
+def file_end(cid: str) -> int:
+    """Byte offset at the end of a transcript. That is where a run's own records begin."""
+    row = get(cid)
+    if row is None:
+        return 0
+    path = path_for(row)
+    return path.stat().st_size if path.exists() else 0
+
+
+def write_tail(cid: str, offset: int, records: list[dict]) -> int:
+    """Replace everything from `offset` with `records` and return the new end of the file.
+
+    A run owns the part of the file it wrote: its own assistant record, then the tool records that
+    followed it. Re-writing that tail on every partial flush keeps the transcript as one record per
+    turn instead of one record per flush, and the order stays the order the turn happened in.
+    """
+    row = get(cid)
+    if row is None:
+        return offset
+    path = path_for(row)
+    with open(path, "r+b" if path.exists() else "wb") as handle:
+        handle.seek(offset)
+        handle.truncate(offset)
+        for record in records:
+            handle.write((json.dumps(record, ensure_ascii=False) + "\n").encode("utf-8"))
+    return path.stat().st_size
+
+
 def messages(cid: str) -> list[dict]:
     """Rebuild the chat message list from a transcript.
 
@@ -136,6 +164,37 @@ def messages_raw(cid: str) -> list[dict]:
     if not path.exists():
         return []
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+
+def repoint_models(slug: str) -> int:
+    """Rewrite a bare model id in a conversation index as the namespaced one.
+
+    This is what connections.bootstrap does on first start, once. An index that already holds
+    namespaced ids is left alone, so running it again changes nothing.
+    """
+    moved = 0
+    for folder in appdata.USERS.glob("*"):
+        moved += _repoint_file(folder / "conversations.json", slug)
+    legacy = config.DATA_DIR / "conversations.json"      # the single-user layout, before per-user folders
+    return moved + _repoint_file(legacy, slug)
+
+
+def _repoint_file(file: Path, slug: str) -> int:
+    if not file.exists():
+        return 0
+    try:
+        rows = json.loads(file.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return 0
+    moved = 0
+    for row in rows:
+        model = str(row.get("model") or "")
+        if model and "/" not in model:
+            row["model"] = f"{slug}/{model}"
+            moved += 1
+    if moved:
+        file.write_text(json.dumps(rows, indent=2) + "\n", encoding="utf-8")
+    return moved
 
 
 def title_for(row: dict) -> str:

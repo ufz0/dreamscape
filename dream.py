@@ -23,9 +23,11 @@ from pathlib import Path
 import accounts
 import agent
 import appdata
+import connections
 import config
 import db
 import dreamlog
+import llm
 import reasoning
 import store
 import usage
@@ -106,24 +108,28 @@ STEP_NAMES = {"wiki_read": "read", "wiki_search": "search", "wiki_list": "read",
 
 
 async def ask(prompt: str, model: str, level: str = "per_transcript", on_step=None, user=None,
-             on_usage=None) -> dict:
+             on_usage=None, target: dict | None = None, connection_map: dict | None = None,
+             connection_id: int | None = None) -> dict:
     """One model turn with wiki tools.
 
     The dreaming job has its own effort levels in data/reasoning.json (medium for transcripts,
-    high for the cleanup pass by default), read through the same mapping as the chat.
+    high for the cleanup pass by default), read through the same mapping as the chat, with the
+    connection's own map layered over it.
 
     `on_step` is called with every tool event so the run can be recorded as it happens.
     Returns the answer, the wiki_write calls it made, the usage the server reported, and the level
     that was actually used.
     """
     levels = reasoning.settings().get("dream", {})
-    mapping = reasoning.resolve(model, levels.get(level, levels.get("per_transcript", "medium")))
+    mapping = reasoning.resolve(model, levels.get(level, levels.get("per_transcript", "medium")), connection_map)
     changes = []
     final = ""
     usage_block = {}
     async for event in agent.run_loop([{"role": "system", "content": prompt}], model, 0.2, mapping=mapping,
-                                      on_usage=lambda block, estimated: record_usage(user, block, model, estimated,
-                                                                                   on_usage)):
+                                      on_usage=lambda block, estimated: record_usage(user, block, model,
+                                                                                   estimated, on_usage,
+                                                                                   connection_id),
+                                      target=target):
         if event["type"] == "assistant_message" and not event["tool_calls"]:
             final = event["content"]
         elif event["type"] == "usage":
@@ -142,12 +148,14 @@ async def ask(prompt: str, model: str, level: str = "per_transcript", on_step=No
     return {"answer": final.strip(), "changes": changes, "usage": usage_block, "level": mapping["level"]}
 
 
-def record_usage(user, block: dict, model: str, estimated: bool, on_usage=None) -> None:
+def record_usage(user, block: dict, model: str, estimated: bool, on_usage=None,
+                 connection_id: int | None = None) -> None:
     """One upstream call, recorded as it happened, plus the running total for the run record."""
     if user is None:
         return
     with db.transaction() as conn:
-        usage.record(conn, user["id"], block, "dreaming", model, None, estimated)
+        usage.record(conn, user["id"], block, "dreaming", model, None, estimated,
+                    connection_id=connection_id)
     if on_usage:
         on_usage(block, estimated)
 
@@ -210,7 +218,14 @@ async def run_user(user: dict, trigger: str = "", dry_run: bool = False, force: 
     """One dreaming run for one user. Called from run(), which sets the current user."""
     paths = appdata.current()
     paths.ensure()
-    model = config.MODEL
+    # The model for dreaming is the one the admin set, resolved through the connections table.
+    with db.transaction() as conn:
+        namespaced = connections.default_model(conn, "dream") or config.MODEL
+        resolved = connections.resolve(conn, namespaced)
+    model = namespaced
+    target = connections.target(resolved["connection"]) if resolved else llm.default_target()
+    connection_map = resolved["connection"].get("reasoning_map") if resolved else None
+    connection_id = resolved["connection"]["id"] if resolved else None
     files = store.idle_transcripts(0 if force or dry_run else config.IDLE_MINUTES)
     levels = reasoning.settings().get("dream", {})
     record = dreamlog.build_record(trigger or config.env("DREAM_TRIGGER", "manual"), model,
@@ -269,7 +284,8 @@ async def run_user(user: dict, trigger: str = "", dry_run: bool = False, force: 
                     result = await ask(prompt, model, "per_transcript",
                                       on_step=lambda event: record_tool_step(record, item["steps"], event, snapshot,
                                                                            path.name),
-                                      user=user, on_usage=count_usage)
+                                      user=user, on_usage=count_usage, target=target,
+                                      connection_map=connection_map, connection_id=connection_id)
                 except Exception as error:
                     step = {"type": "error", "summary": str(error), "attempt": attempt}
                     record["errors"].append({"message": str(error), "attempt": attempt, "at": dreamlog.now(),
@@ -301,7 +317,8 @@ async def run_user(user: dict, trigger: str = "", dry_run: bool = False, force: 
                                                    index_limit=config.INDEX_MAX_LINES),
                                model, "cleanup",
                                on_step=lambda event: record_tool_step(record, record["cleanup"]["steps"], event, snapshot, "cleanup"),
-                               user=user, on_usage=count_usage)
+                               user=user, on_usage=count_usage, target=target,
+                               connection_map=connection_map, connection_id=connection_id)
             record["cleanup"]["note"] = cleanup["answer"]
         except Exception as error:
             record["status"] = "partial"
