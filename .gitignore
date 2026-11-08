@@ -1,0 +1,22 @@
+# Data: transcripts, conversations, the reasoning mapping, and the wiki (which is its own git repo)
+data/
+
+# Secrets. Only .env.example is committed.
+.env
+
+# Python and generated
+__pycache__/
+*.pyc
+.venv/
+
+# Generated design renders
+design/**/*.png
+
+# Logs
+*.log
+
+# OS
+.DS_Store
+
+# If a frontend tool is ever added
+node_modules/
