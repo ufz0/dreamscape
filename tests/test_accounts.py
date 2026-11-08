@@ -35,7 +35,9 @@ def test_validation(conn):
     assert accounts.validate_username("bob bloggs") is not None
     assert accounts.validate_username("bob+") is not None
     assert accounts.validate_password("a long enough password") is None
-    assert accounts.validate_password("short") is not None
+    assert accounts.validate_password("12345678") is None          # eight is the minimum
+    assert accounts.validate_password("1234567") is not None       # seven is not
+    assert "at least 8" in accounts.validate_password("short")
     with pytest.raises(ValueError):
         accounts.create_user(conn, "bob", "short", actor="test")
     make_user(conn, "ada")

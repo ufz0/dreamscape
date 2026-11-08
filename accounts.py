@@ -21,7 +21,7 @@ import db
 import limits
 
 USERNAME_RE = re.compile(r"^[a-z0-9._-]{3,32}$")
-MIN_PASSWORD_LENGTH = 10
+MIN_PASSWORD_LENGTH = 8
 SESSION_DAYS = 30
 MAX_LOGIN_FAILURES = 5
 LOCKOUT_MINUTES = 10

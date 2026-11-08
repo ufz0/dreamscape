@@ -109,7 +109,7 @@ export function openChangePassword(options = {}) {
 
     const current = field("Current password", "password");
     const next = field("New password", "password");
-    next.input.placeholder = "at least 10 characters";
+    next.input.placeholder = "at least 8 characters";
     const status = document.createElement("p");
     status.className = "muted";
 
