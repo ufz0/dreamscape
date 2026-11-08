@@ -1,5 +1,6 @@
 """Test setup: a throwaway data folder, so the real data/ is never touched."""
 import os
+import shutil
 import sys
 import tempfile
 from datetime import datetime, timezone
@@ -28,6 +29,11 @@ def conn():
     for table in ("usage_events", "sessions", "login_attempts", "audit", "app_settings", "users"):
         connection.execute(f"DELETE FROM {table}")
     connection.commit()
+    # User ids are reused once the rows are gone, so the folders must be cleared as well:
+    # otherwise a test reads files another test left in the same folder.
+    for folder in appdata.USERS.glob("*"):
+        shutil.rmtree(folder, ignore_errors=True)
+    appdata.CURRENT.set(None)
     yield connection
     connection.close()
 

@@ -273,6 +273,10 @@ export async function openSettings() {
         settings.system = value;
         save(settings);
       })),
+      controlRow("Name a chat from the first reply", checkbox(settings.generateTitles, (value) => {
+        settings.generateTitles = value;
+        save(settings);
+      })),
     ));
 
     card.append(section("Reasoning",

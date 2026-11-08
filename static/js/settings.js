@@ -9,6 +9,7 @@ const DEFAULTS = {
   autoExpandThinking: false,
   reasoningEffort: "medium",
   wikiIndex: true,
+  generateTitles: true,
   sidebarCollapsed: false,
 };
 

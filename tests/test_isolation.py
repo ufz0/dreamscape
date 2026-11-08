@@ -77,6 +77,8 @@ def test_conversations_are_not_shared(conn):
     assert bob_client.get("/api/conversations").json()["conversations"] == []
     assert [row["title"] for row in admin_client.get("/api/conversations").json()["conversations"]] == ["admin chat"]
     assert bob_client.delete(f"/api/conversations/{created['id']}").status_code == 404
+    # Naming is the same path: bob cannot name a chat that is not his.
+    assert bob_client.post(f"/api/conversations/{created['id']}/title", json={}).status_code == 404
 
 
 def test_dream_runs_and_usage_are_per_user(conn):

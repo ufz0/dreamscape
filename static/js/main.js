@@ -216,6 +216,7 @@ async function send(text, regenerate = false) {
   if (limitUntil || mustChange()) return;
 
   const level = effortFor(chatId);
+  const firstTurn = !chatId;
   if (!chatId) {
     const created = await api("/api/conversations", {
       method: "POST", headers: { "Content-Type": "application/json" },
@@ -244,12 +245,15 @@ async function send(text, regenerate = false) {
   controller = new AbortController();
   setGenerating(true);
 
+  let answered = false;
+
   try {
     await streamChat({
       conversation_id: chatId, message: text, model: currentModel(), system: settings.system,
       temperature: settings.temperature, wiki_index: settings.wikiIndex, regenerate,
       reasoning_effort: level,
     }, (event) => view.handle(event), controller.signal);
+    answered = true;
   } catch (error) {
     if (error.status === 429) {
       view.removeLastMessage();
@@ -260,6 +264,17 @@ async function send(text, regenerate = false) {
   } finally {
     setGenerating(false);
     controller = null;
+    // A new chat gets its name from the model after the first reply, when that setting is on.
+    // Only after an answer: a failed or stopped turn has nothing to name, and naming would be a
+    // metered call for nothing. The server keeps a name typed by hand and skips the call when the
+    // limit is reached, so a title is never lost because of this.
+    if (firstTurn && answered && settings.generateTitles && chatId) {
+      // The name is not worth a message about it, so a failure here is not shown.
+      await api(`/api/conversations/${chatId}/title`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ model: currentModel() }),
+      }).catch(() => {});
+    }
     await renderList();
     const row = (await api("/api/conversations")).conversations.find((r) => r.id === chatId);
     if (row) ui.title.textContent = row.title;

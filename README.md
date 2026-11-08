@@ -17,6 +17,8 @@ accounts and usage, plain files for everything else — no framework, no build s
 - Accounts with an admin role, session cookies, CSRF, login rate limiting, per-user data folders,
   per-user token usage statistics and optional daily/weekly token limits. An admin panel at
   `/admin` shows the users and the usage numbers, with a chart and CSV export.
+- Chat titles: a new chat is named after its first reply, unless a name was typed by hand or the
+  setting is off. The title call is metered like any other call.
 
 ## Setup
 
@@ -142,6 +144,18 @@ active admin, so the last one cannot be demoted, disabled or deleted.
 Deleting a user removes their data folder but keeps their usage rows with `user_id` set to NULL, so the
 aggregate numbers for a period do not change; those rows show as "(deleted user)".
 
+## Chat titles
+
+A new chat is named after its first reply (`titles.py`, `prompts/title.md`): the model is asked for a
+short name, and the result is stored as the conversation title. A name typed by hand is never
+overwritten, so the call only happens when no title is stored yet. The call is metered like any other
+upstream call — the limit is checked first and the usage is recorded — and when the limit is reached no
+call is made; the title stays whatever the app would show anyway, which is the first line of the message.
+
+The request uses reasoning level `none` and `max_tokens` 40, since naming a chat does not need thinking.
+The client asks for a name only after the first reply, driven by the Settings row "Name a chat from the
+first reply" (on by default). Titles are cleaned to one line, no quotes, max 60 characters.
+
 ## Tests
 
 ```sh
@@ -150,8 +164,10 @@ aggregate numbers for a period do not change; those rows show as "(deleted user)
 
 The tests cover the limit semantics (every combination, the boundary at exactly the limit, day and
 week rollover including the Monday start and the timezone), period aggregation, the last-admin rule,
-first-run setup, login rate limiting, and per-user isolation through both the tools and the endpoints.
-They run against a throwaway data folder, never the real `data/`.
+first-run setup, login rate limiting, chat titles (cleaning, the metered call and the estimate when the
+endpoint reports nothing, a typed name kept, a reached limit skipping the call), and per-user isolation
+through both the tools and the endpoints. They run against a throwaway data folder, never the real `data/`;
+the fixture clears the user folders too, because user ids are reused once the rows are deleted.
 
 `scripts/seed_demo.py` creates a few fake users with fake usage over several months for looking at the
 admin charts. It is never run automatically and writes to its own `data/demo` folder.
@@ -167,13 +183,14 @@ limits.py      limit parsing, local day/week windows, the check, reset time
 usage.py       recording one call, and period aggregation for the admin views
 appdata.py     per-user data folders, contextvar for the current user, first-run migration
 agent.py       wiki tools + tool loop (usage and limit hooks)
-llm.py         httpx upstream, normalised streaming events
+llm.py         httpx upstream, normalised streaming events, one non-streaming completion
+titles.py      naming a chat from the first exchange, cleaning the result, the metered call
 dream.py       the dreaming job, per user
 dreamlog.py    run records, readers, live progress per user
 graph.py       graph data for the wiki view, cached per user
 reasoning.py   effort levels -> request fields per model
 wiki.py store.py config.py
-prompts/       system.md, dream_per_transcript.md, dream_cleanup.md
+prompts/       system.md, dream_per_transcript.md, dream_cleanup.md, title.md
 static/        index.html, wiki.html, auth.html, admin.html, styles.css, admin.css,
                js/ modules (including the account popup and the admin panel), fonts/, icons
 scripts/       make_logo.py, make_icons.py, seed_demo.py
