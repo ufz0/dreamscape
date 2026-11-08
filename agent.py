@@ -6,6 +6,7 @@ from typing import AsyncIterator
 import config
 import llm
 import reasoning
+import usage
 import wiki
 
 TOOLS = [
@@ -59,16 +60,23 @@ def execute_tool(name: str, arguments: dict) -> dict:
 
 async def run_loop(messages: list[dict], model: str, temperature: float,
                    max_iterations: int = config.MAX_TOOL_ITERATIONS,
-                   mapping: dict | None = None) -> AsyncIterator[dict]:
+                   mapping: dict | None = None, on_usage=None, limit_check=None) -> AsyncIterator[dict]:
     """Call the model, run any tool calls, repeat until it answers or the limit is hit.
 
     `mapping` is the resolved reasoning-effort request for this turn (see reasoning.py). It is
     resolved once and used for every iteration of the loop, so tool calls in one turn do not
     change the effort mid-way.
 
-    Yields the upstream events plus two of its own:
+    `on_usage(usage, estimated)` is called for every upstream call, which is what the usage table
+    records: one row per iteration of the loop, not one per turn. `estimated` is true when the
+    server did not report usage. `limit_check()` is called before each call; when it returns a
+    limit, no call is made and a "limit_reached" event is yielded instead. A response that is
+    already streaming is allowed to finish, so a user can overshoot by at most one response.
+
+    Yields the upstream events plus three of its own:
       {"type": "assistant_message", "content", "reasoning", "reasoning_ms", "reasoning_only", "tool_calls"}
       {"type": "tool", "id", "name", "arguments", "result"}
+      {"type": "limit_reached", ...}
 
     Thinking stays in its own field and is never sent back to the model in later turns.
     "reasoning_only" is the case where the model put everything inside <think> and stopped.
@@ -78,18 +86,33 @@ async def run_loop(messages: list[dict], model: str, temperature: float,
     extra_body = mapping.get("body") or {}
 
     for iteration in range(max_iterations):
+        if limit_check:
+            blocked = limit_check()
+            if blocked:
+                yield {"type": "limit_reached", **blocked}
+                return
+
         content = ""
         reasoning_text = ""
         started = time.monotonic()
         calls: list[dict] = []
+        reported = None
         async for event in llm.stream_chat(messages, model, temperature, tools=TOOLS, extra_body=extra_body):
-            if event["type"] == "delta":
+            if event["type"] == "usage":
+                reported = event.get("usage") or {}
+            elif event["type"] == "delta":
                 content += event["content"]
             elif event["type"] == "reasoning":
                 reasoning_text += event["content"]
             elif event["type"] == "tool_calls":
                 calls = event["tool_calls"]
             yield event
+
+        if on_usage:
+            if reported:
+                on_usage(reported, False)
+            else:
+                on_usage(usage.estimate(messages, content + reasoning_text), True)
 
         if not calls:
             fallback = llm.parse_text_tool_call(content, TOOL_NAMES)

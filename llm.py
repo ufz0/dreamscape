@@ -144,6 +144,9 @@ async def stream_chat(messages: list[dict], model: str, temperature: float,
     (reasoning_effort, chat_template_kwargs, ...). It is merged last so the mapping wins.
     """
     payload = {"model": model, "messages": messages, "stream": True}
+    # Ask for the usage block in the last streamed chunk; servers that support stream_options send
+    # it as an extra chunk with no choices. When it does not come back, the caller estimates.
+    payload["stream_options"] = {"include_usage": True}
     if temperature is not None:
         payload["temperature"] = temperature
     if tools:
