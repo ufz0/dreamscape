@@ -1,6 +1,9 @@
 # Data: transcripts, conversations, the reasoning mapping, and the wiki (which is its own git repo)
 data/
 
+# The backup copy made by the first-run migration, next to data/
+data-backup-*/
+
 # Secrets. Only .env.example is committed.
 .env
 

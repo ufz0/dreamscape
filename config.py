@@ -59,8 +59,8 @@ SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,80}$")
 
 
 def ensure_dirs() -> None:
-    for path in (INBOX, PROCESSED, WIKI):
-        path.mkdir(parents=True, exist_ok=True)
+    """Root data folder. Per-user folders are created by appdata.Paths.ensure()."""
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def read_prompt(name: str, **values) -> str:
