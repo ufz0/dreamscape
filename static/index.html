@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>dreamscape</title>
+  <link rel="icon" href="/static/favicon.ico" sizes="any">
+  <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="/static/apple-touch-icon.png">
+  <link rel="manifest" href="/static/site.webmanifest">
+  <meta name="theme-color" content="#faf9f5">
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <div class="app">
+    <div class="scrim" id="scrim" hidden></div>
+
+    <aside class="sidebar" id="sidebar" aria-label="Sidebar">
+      <div class="side-head">
+        <a class="brand" href="/" title="dreamscape">
+          <span class="mark" data-icon="logo" data-size="20"></span>
+          <strong class="wordmark">dreamscape</strong>
+        </a>
+        <button class="icon-btn" id="collapse" data-icon="panel" title="Collapse sidebar" aria-label="Collapse sidebar"></button>
+      </div>
+
+      <button class="new-chat" id="new-chat" title="New chat (Control+Shift+O)">
+        <span class="plus" data-icon="plus" data-size="13"></span>
+        <span class="label">New chat</span>
+        <kbd>Ctrl Shift O</kbd>
+      </button>
+
+      <nav aria-label="Sections">
+        <a class="nav-row active" href="/" id="nav-chats" title="Chats">
+          <span data-icon="chat" data-size="18"></span><span class="label">Chats</span>
+        </a>
+        <a class="nav-row" href="/wiki" title="Wiki">
+          <span data-icon="book" data-size="18"></span><span class="label">Wiki</span>
+        </a>
+      </nav>
+
+      <div class="side-search">
+        <span data-icon="search" data-size="16"></span>
+        <input id="search" type="search" placeholder="Search chats" aria-label="Search chats">
+      </div>
+
+      <div class="side-list" id="chat-list" aria-label="Recent chats"></div>
+
+      <div class="side-foot">
+        <span class="avatar" id="avatar">L</span>
+        <span class="who">local</span>
+        <button class="icon-btn" id="settings" data-icon="gear" title="Settings" aria-label="Settings"></button>
+      </div>
+    </aside>
+
+    <main class="main" id="main">
+      <header class="topbar" id="topbar">
+        <button class="icon-btn hamburger" id="hamburger" data-icon="menu" title="Open sidebar" aria-label="Open sidebar"></button>
+        <button class="chat-title" id="chat-title" title="Rename this chat">New chat</button>
+        <span class="spacer"></span>
+        <button class="icon-btn" id="chat-menu" data-icon="dots" title="Chat menu" aria-label="Chat menu"></button>
+      </header>
+
+      <section class="empty-state" id="empty">
+        <div class="greeting">
+          <span class="mark" data-icon="logo" data-size="30"></span>
+          <h1 id="greeting-text">Good evening, there</h1>
+          <div class="pills" id="pills"></div>
+        </div>
+      </section>
+
+      <section class="thread" id="thread" tabindex="0" aria-label="Conversation"></section>
+
+      <button class="jump" id="jump" data-icon="arrowDown" title="Scroll to bottom"
+              aria-label="Scroll to the latest message" hidden></button>
+
+      <section class="composer-area">
+        <div class="composer-inner">
+          <div class="composer" id="composer">
+            <textarea id="input" rows="1" placeholder="How can I help you today?" aria-label="Message"></textarea>
+            <div class="composer-row">
+              <button class="icon-btn" id="attach" data-icon="plus" disabled
+                      title="Not supported yet" aria-label="Attach file"></button>
+              <button class="icon-btn" id="options" data-icon="sliders"
+                      title="Temperature, system prompt, wiki" aria-label="Message options"></button>
+              <button class="effort-btn" id="effort" title="Reasoning effort" aria-label="Reasoning effort">
+                <span data-icon="brain" data-size="15"></span><span class="name"></span>
+              </button>
+              <span class="spacer"></span>
+              <button class="model-btn" id="model-btn" title="Choose model" aria-label="Choose model">
+                <span class="name"></span><span data-icon="caret" data-size="14"></span>
+              </button>
+              <button class="send" id="send" data-icon="arrowUp" disabled title="Send" aria-label="Send"></button>
+            </div>
+          </div>
+          <p class="disclaimer" id="disclaimer" hidden>AI can make mistakes. Please double-check responses.</p>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <script type="module" src="/static/js/main.js"></script>
+</body>
+</html>

@@ -1,0 +1,116 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>dreamscape — wiki</title>
+  <link rel="icon" href="/static/favicon.ico" sizes="any">
+  <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="/static/apple-touch-icon.png">
+  <link rel="manifest" href="/static/site.webmanifest">
+  <meta name="theme-color" content="#faf9f5">
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <div class="app">
+    <div class="scrim" id="scrim" hidden></div>
+
+    <aside class="sidebar" id="sidebar" aria-label="Sidebar">
+      <div class="side-head">
+        <a class="brand" href="/" title="dreamscape">
+          <span class="mark" data-icon="logo" data-size="20"></span>
+          <strong class="wordmark">dreamscape</strong>
+        </a>
+        <button class="icon-btn" id="collapse" data-icon="panel" title="Collapse sidebar" aria-label="Collapse sidebar"></button>
+      </div>
+
+      <button class="new-chat" id="new-chat" title="New chat (Control+Shift+O)">
+        <span class="plus" data-icon="plus" data-size="13"></span>
+        <span class="label">New chat</span>
+        <kbd>Ctrl Shift O</kbd>
+      </button>
+
+      <nav aria-label="Sections">
+        <a class="nav-row" href="/" title="Chats">
+          <span data-icon="chat" data-size="18"></span><span class="label">Chats</span>
+        </a>
+        <a class="nav-row active" href="/wiki" id="nav-wiki" title="Wiki">
+          <span data-icon="book" data-size="18"></span><span class="label">Wiki</span>
+        </a>
+      </nav>
+
+      <div class="side-search">
+        <span data-icon="search" data-size="16"></span>
+        <input id="search" type="search" placeholder="Search chats" aria-label="Search chats">
+      </div>
+
+      <div class="side-list" id="chat-list" aria-label="Recent chats"></div>
+
+      <div class="side-foot">
+        <span class="avatar" id="avatar">L</span>
+        <span class="who">local</span>
+        <button class="icon-btn" id="settings" data-icon="gear" title="Settings" aria-label="Settings"></button>
+      </div>
+    </aside>
+
+    <main class="main">
+      <header class="topbar">
+        <button class="icon-btn hamburger" id="hamburger" data-icon="menu" title="Open sidebar" aria-label="Open sidebar"></button>
+        <span class="chat-title static">Wiki</span>
+        <div class="tabs" role="tablist" aria-label="Wiki view">
+          <button class="tab on" id="tab-list" role="tab" aria-selected="true">List</button>
+          <button class="tab" id="tab-graph" role="tab" aria-selected="false">Graph</button>
+          <button class="tab" id="tab-dream" role="tab" aria-selected="false">Dream log</button>
+        </div>
+        <span class="spacer"></span>
+        <a class="last-dream" id="last-dream" hidden></a>
+        <button class="small-button" id="dream" title="Run the dreaming job now">Dream now</button>
+      </header>
+
+      <div class="wiki-main" id="wiki-main">
+        <form class="wiki-search" id="search-form">
+          <input id="query" type="search" placeholder="Search pages and transcripts" aria-label="Search the wiki">
+          <button class="small-button" type="submit">Search</button>
+        </form>
+
+        <div class="wiki-cols">
+          <nav class="wiki-nav" aria-label="Wiki pages">
+            <ul class="wiki-list" id="pages"></ul>
+            <p class="muted" id="stats"></p>
+          </nav>
+
+          <article class="wiki-article">
+            <h2 id="page-name">index</h2>
+            <div class="wiki-page text" id="page-body"></div>
+            <div class="backlinks" id="backlinks"></div>
+            <details class="local-graph" id="local-graph">
+              <summary>Local graph — this page and its neighbours</summary>
+              <div class="local-graph-box" id="local-graph-box"></div>
+            </details>
+            <details class="editor-box">
+              <summary>Edit this page</summary>
+              <textarea class="editor" id="editor" aria-label="Page source"></textarea>
+              <button class="small-button" id="save">Save</button>
+            </details>
+            <p class="muted" id="status"></p>
+          </article>
+        </div>
+      </div>
+
+      <div class="graph-view" id="graph-view" hidden></div>
+
+      <div class="dream-view" id="dream-view" hidden>
+        <nav class="dream-runs" id="dream-runs" aria-label="Dream runs"></nav>
+        <section class="dream-detail" aria-label="Dream run detail">
+          <header class="dream-detail-head" id="dream-detail-head"></header>
+          <p class="dream-status" id="dream-status" aria-live="polite"></p>
+          <div class="dream-filters" id="dream-filters"></div>
+          <div class="dream-timeline" id="dream-timeline"></div>
+        </section>
+      </div>
+    </main>
+  </div>
+
+  <script type="module" src="/static/js/wiki.js"></script>
+</body>
+</html>
