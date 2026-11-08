@@ -19,7 +19,8 @@ import app
 import appdata
 import llm
 import store
-from conftest import make_user
+import runs
+from conftest import fake_upstream, finish, make_user
 from test_isolation import client_for
 
 
@@ -85,7 +86,7 @@ class FakeUpstream:
 def use_upstream(monkeypatch, responses):
     """One shared fake: the tool loop calls it once per iteration, so the answers are consumed in order."""
     upstream = FakeUpstream(responses)
-    monkeypatch.setattr(llm, "client", lambda: upstream)
+    monkeypatch.setattr(llm, "client", lambda target=None: upstream)
 
 
 @pytest.fixture()
@@ -275,14 +276,18 @@ def test_transcript_keeps_tool_calls_and_the_reasoning_field_separate(conn, monk
     client.headers["X-CSRF-Token"] = client.cookies.get("csrf")
 
     created = client.post("/api/conversations", json={}).json()["conversation"]
-    responses = [
-        sse([delta(reasoning="Thinking about the wiki.", finish_reason="tool_calls",
-                    tool_calls=[tool_call(0, "wiki_list", "{}", call_id="call-1")])]),
-        sse([delta(content="Here is the answer.", finish_reason="stop")]),
-    ]
-    use_upstream(monkeypatch, responses)
-    stream = client.post("/api/chat", json={"conversation_id": created["id"], "message": "hello"})
-    assert stream.status_code == 200
+    fake_upstream(monkeypatch, {
+        "stream": [
+            [delta(reasoning="Thinking about the wiki.", finish_reason="tool_calls",
+                   tool_calls=[tool_call(0, "wiki_list", "{}", call_id="call-1")])],
+            [delta(content="Here is the answer.", finish_reason="stop")],
+        ],
+    })
+    started = client.post(f"/api/conversations/{created['id']}/messages",
+                          json={"message": "hello", "model": "test-model"})
+    assert started.status_code == 202
+    run = finish(runs.get(started.json()["run_id"]))
+    assert run.status == "completed"
 
     appdata.set_current(bob["id"])
     records = store.messages_raw(created["id"])
@@ -311,8 +316,10 @@ def test_transcript_stores_the_note_only_for_the_reasoning_only_turn(conn, monke
     client = client_for(conn, bob)
 
     created = client.post("/api/conversations", json={}).json()["conversation"]
-    use_upstream(monkeypatch, [sse([delta(reasoning="Nothing came out.", finish_reason="length")])])
-    client.post("/api/chat", json={"conversation_id": created["id"], "message": "hello"})
+    fake_upstream(monkeypatch, {"stream": [[delta(reasoning="Nothing came out.", finish_reason="length")]]})
+    started = client.post(f"/api/conversations/{created['id']}/messages",
+                          json={"message": "hello", "model": "test-model"})
+    finish(runs.get(started.json()["run_id"]))
 
     appdata.set_current(bob["id"])
     record = [record for record in store.messages_raw(created["id"]) if record["role"] == "assistant"][0]

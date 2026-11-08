@@ -15,8 +15,9 @@ def fake_complete(text, usage_block):
     """A stand-in for the upstream, so the test does not depend on a server answering."""
     calls = []
 
-    async def complete(messages, model, temperature, max_tokens=None, extra_body=None):
-        calls.append({"messages": messages, "model": model, "max_tokens": max_tokens, "extra_body": extra_body})
+    async def complete(target, model, messages, temperature, max_tokens=None, extra_body=None):
+        calls.append({"target": target, "model": model, "messages": messages,
+                      "max_tokens": max_tokens, "extra_body": extra_body})
         return {"text": text, "usage": usage_block}
 
     return complete, calls

@@ -6,6 +6,7 @@ import pytest
 
 import accounts
 import limits
+import settings
 from conftest import add_usage, make_user
 
 # A fixed instant so the window boundaries are deterministic: 2026-11-08 is a Sunday,
@@ -111,8 +112,9 @@ def test_the_notice_and_the_usage_bars_word_a_reached_limit_the_same_way(conn):
     assert daily["reached"] is True
     assert daily["message"] == blocked["message"]
     assert daily["resets_text"] == limits.reset_text(limits.reset_at("daily", NOW))
-    assert daily["message"] == ("Daily token limit reached (1k). Used 1.2k. "
+    assert daily["message"] == ("Daily token limit reached (1k, your own limit). Used 1.2k. "
                                 "Resets at 00:00 on 09 Nov 2026.")
+    assert daily["source"] == "own"
     # The wording names the window, the usage, the limit and the reset, and the values are there too.
     assert (daily["window"], daily["used"], daily["limit"]) == ("daily", 1200, 1000)
     assert state["windows"][1]["reached"] is False and state["windows"][1]["message"] == ""
@@ -161,7 +163,116 @@ def test_parse_limit_accepts_the_documented_forms(conn):
     assert limits.parse_limit("100k") == 100000
     assert limits.parse_limit("1.5m") == 1500000
     assert limits.parse_limit(100000) == 100000
+    # "unlimited" is the one value that says this user is not capped whatever the global default is.
+    assert limits.parse_limit("unlimited") == -1
+    assert limits.parse_limit("∞") == -1
+    assert limits.parse_limit(-1) == -1
     with pytest.raises(ValueError):
         limits.parse_limit("not a number")
     assert limits.format_k(12345) == "12.3k"
     assert limits.format_k(1200000) == "1.2M"
+
+
+# ---------- the global defaults ----------
+
+USER_VALUES = {"empty": "", "zero": 0, "positive": 1000, "unlimited": -1}
+GLOBAL_VALUES = {"empty": "", "zero": 0, "positive": 2000}
+
+
+def test_every_combination_resolves_the_right_limit(conn):
+    """Own > 0 wins, otherwise the global default, otherwise nothing. Per window, on its own."""
+    for window in ("daily", "weekly"):
+        for user_name, user_value in USER_VALUES.items():
+            for global_name, global_value in GLOBAL_VALUES.items():
+                user = make_user(conn, f"{window}-{user_name}-{global_name}",
+                                 **{f"{window}_limit": limits.parse_limit(user_value)})
+                settings.set_value(conn, {"username": "test"}, f"global_{window}_limit",
+                                   limits.parse_limit(global_value))
+
+                resolved = limits.resolve(conn, user, window, NOW)
+                if limits.parse_limit(user_value) > 0:
+                    expected = ("own", limits.parse_limit(user_value))
+                elif limits.parse_limit(user_value) == -1:
+                    expected = ("unlimited", 0)
+                elif limits.parse_limit(global_value) > 0:
+                    expected = ("global", limits.parse_limit(global_value))
+                else:
+                    expected = ("none", 0)
+                assert (resolved["source"], resolved["limit"]) == expected, (window, user_name, global_name)
+
+
+def test_the_windows_are_resolved_independently(conn):
+    """Daily from the user, weekly from the global default. The daily cap does not create a weekly one."""
+    user = make_user(conn, "mixed", daily_limit=1000, weekly_limit=0)
+    settings.set_value(conn, {"username": "test"}, "global_daily_limit", 2000)
+    settings.set_value(conn, {"username": "test"}, "global_weekly_limit", 5000)
+
+    assert limits.resolve(conn, user, "daily", NOW)["source"] == "own"
+    assert limits.resolve(conn, user, "daily", NOW)["limit"] == 1000
+    assert limits.resolve(conn, user, "weekly", NOW)["source"] == "global"
+    assert limits.resolve(conn, user, "weekly", NOW)["limit"] == 5000
+
+    # Between the two: only the daily is over, and its message names the user's own value.
+    add_usage(conn, user["id"], 1100, timestamp=NOW.isoformat())
+    blocked = limits.check(conn, user, NOW)
+    assert blocked["window"] == "daily" and "your own limit" in blocked["message"]
+    state = limits.usage_state(conn, user, NOW)
+    assert [window["reached"] for window in state["windows"]] == [True, False]
+
+    # Only the weekly: the global default applies to the weekly window, and a window with no limit is
+    # never reached, so the daily one stays clear for this user.
+    settings.set_value(conn, {"username": "test"}, "global_daily_limit", 0)
+    only_weekly = make_user(conn, "weekly_only", daily_limit=0, weekly_limit=2000)
+    add_usage(conn, only_weekly["id"], 2100, timestamp=NOW.isoformat())
+    blocked = limits.check(conn, only_weekly, NOW)
+    assert blocked["window"] == "weekly" and "your own limit" in blocked["message"]
+    assert limits.usage_state(conn, only_weekly, NOW)["windows"][0]["reached"] is False
+
+
+def test_an_explicit_unlimited_overrides_the_global_default(conn):
+    user = make_user(conn, "unlimited", daily_limit=-1, weekly_limit=-1)
+    settings.set_value(conn, {"username": "test"}, "global_daily_limit", 100000)
+    settings.set_value(conn, {"username": "test"}, "global_weekly_limit", 100000)
+    add_usage(conn, user["id"], 500000, timestamp=NOW.isoformat())
+    assert limits.check(conn, user, NOW) is None
+    state = limits.usage_state(conn, user, NOW)
+    for window in state["windows"]:
+        assert (window["source"], window["limit"], window["reached"]) == ("unlimited", 0, False)
+
+
+def test_an_empty_user_value_follows_the_global_default_in_the_usage_bars(conn):
+    """The bars show the effective limit, not the value stored on the user row."""
+    user = make_user(conn, "inheriting", daily_limit=0, weekly_limit=0)
+    settings.set_value(conn, {"username": "test"}, "global_daily_limit", 1000)
+    settings.set_value(conn, {"username": "test"}, "global_weekly_limit", 2000)
+    add_usage(conn, user["id"], 1200, timestamp=NOW.isoformat())
+
+    state = limits.usage_state(conn, user, NOW)
+    daily, weekly = state["windows"]
+    assert (daily["own"], daily["source"], daily["limit"], daily["percent"], daily["reached"]) == \
+           (0, "global", 1000, 120.0, True)
+    assert "global default" in daily["message"]
+    assert (weekly["own"], weekly["source"], weekly["limit"], weekly["reached"]) == (0, "global", 2000, False)
+
+    # And the admin table shows the same thing: the effective limit and where it comes from.
+    row = accounts.list_users(conn)
+    entry = next(entry for entry in row if entry["id"] == user["id"])
+    assert entry["effective"]["daily"]["source"] == "global"
+    assert entry["effective"]["daily"]["limit"] == 1000
+    assert entry["effective"]["weekly"]["source"] == "global"
+    assert entry["effective"]["weekly"]["limit"] == 2000
+
+
+def test_the_create_user_dialog_follows_the_same_rules(conn):
+    """An empty value in the dialog is stored as 0, which means "use the global value"."""
+    settings.set_value(conn, {"username": "test"}, "global_daily_limit", 1000)
+    created = accounts.create_user(conn, "newuser", "a long enough password", actor="test",
+                                  daily_limit="", weekly_limit=5000)
+    assert created["daily_limit"] == 0 and created["weekly_limit"] == 5000
+    assert limits.resolve(conn, created, "daily", NOW)["source"] == "global"
+    assert limits.resolve(conn, created, "weekly", NOW)["source"] == "own"
+    # "unlimited" from the dialog is stored as -1 and wins over the global default.
+    unlimited = accounts.create_user(conn, "unlimiteduser", "a long enough password", actor="test",
+                                    daily_limit="unlimited", weekly_limit="")
+    assert unlimited["daily_limit"] == -1
+    assert limits.resolve(conn, unlimited, "daily", NOW)["source"] == "unlimited"
