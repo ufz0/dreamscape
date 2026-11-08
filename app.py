@@ -2,14 +2,17 @@
 
 Every route below is behind a session: API calls without one get 401, pages redirect to /login.
 State-changing requests also need the CSRF header. The current user is set for the call, so the
-data modules work inside that user's folder. `/healthz` is the one route without a session, so a
-container health check can reach it.
+data modules work inside that user's folder. The routes without a session are /healthz, /login,
+/setup while no accounts exist, /register when self-registration is on, and the static assets.
+
+The automatic /docs, /redoc and /openapi.json are turned off, because that would put the route map
+on a public address. /healthz stays open and says only whether the app can read its own data.
 """
-import asyncio
 import html
 import json
-import time
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
+from typing import AsyncIterator
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response, StreamingResponse
@@ -19,29 +22,62 @@ import agent
 import appdata
 import auth
 import config
+import connections
 import db
 import dream
 import dreamlog
 import graph
 import limits
-import llm
+import migrations
 import reasoning
+import runs
+import settings
 import store
 import titles
 import usage as usagelog
 import websearch
 import wiki
 
-app = FastAPI(title="dreamscape")
-STOP: set[str] = set()
+# No /docs, /redoc or /openapi.json: the app is reachable from the network, and a route map is not
+# something a health check or a login page needs.
+app = FastAPI(title="dreamscape", docs_url=None, redoc_url=None, openapi_url=None)
 
 MEDIA = {"html": "text/html", "css": "text/css", "js": "text/javascript", "woff2": "font/woff2",
          "svg": "image/svg+xml", "png": "image/png", "ico": "image/x-icon",
          "webmanifest": "application/manifest+json"}
 
 
-def sse(payload: dict) -> str:
-    return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+def sse(payload: dict, event_id: int | None = None) -> str:
+    """One SSE frame. The id is the event's position in the run, so a client can pick up after it."""
+    head = f"id: {event_id}\n" if event_id is not None else ""
+    return f"{head}data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    """What happens at start and at stop.
+
+    Start: the pending migrations (with the backup), then the runs this process did not finish.
+    Stop: no new runs are accepted, and active ones get 60 seconds to write what they have.
+    """
+    with db.transaction() as conn:
+        result = migrations.apply(conn, log=lambda message: print(message, flush=True))
+        if result["backup"]:
+            print(f"migrations: data/app.db copied to {result['backup']} before applying "
+                  f"{len(result['applied'])} file(s)", flush=True)
+    runs.mark_interrupted_at_startup()
+
+    warning = auth.startup_warning()
+    if warning:
+        print(f"startup: {warning}", flush=True)
+
+    yield
+    finished = runs.shutdown(grace=60)
+    if finished:
+        print(f"shutdown: {finished} run(s) finished within the grace period", flush=True)
+
+
+app.router.lifespan_context = lifespan
 
 
 @app.middleware("http")
@@ -54,19 +90,6 @@ async def csrf_check(request: Request, call_next):
     if not auth.csrf_ok(request):
         return JSONResponse({"detail": "CSRF check failed. Reload the page and try again."}, status_code=403)
     return await call_next(request)
-
-
-def system_prompt(system: str, inject_index: bool = True, effort_line: str = "", web: bool = False) -> str:
-    if inject_index:
-        index = wiki.index_text()
-    else:
-        index = "(wiki index not injected for this conversation)"
-    base = config.read_prompt("system.md", date=datetime.now(timezone.utc).strftime("%Y-%m-%d"),
-                             index=index, system=system or "(none)")
-    # Only when the web tools are actually offered to this conversation.
-    if web:
-        base = f"{base}\n\n{config.read_prompt('web_tools.md')}"
-    return f"{base}\n\n{effort_line}" if effort_line else base
 
 
 # ---------- pages ----------
@@ -297,8 +320,8 @@ async def change_password(request: Request):
 
 
 def client_ip(request: Request) -> str:
-    forwarded = (request.headers.get("x-forwarded-for") or "").split(",")[0].strip()
-    return forwarded or (request.client.host if request.client else "")
+    """The address the login rate limiting records. auth.py owns when a forwarded header is believed."""
+    return auth.client_ip(request)
 
 
 # ---------- accounts and usage for the current user ----------
@@ -392,17 +415,24 @@ async def admin_delete_user(user_id: int, request: Request):
 
 @app.get("/api/admin/settings")
 def admin_settings(request: Request):
+    """Everything an admin can change at runtime: the flags, the global limits, the defaults, the
+    run limits. All of it lives in the settings table, not in .env."""
     auth.require_admin(request)
     with db.transaction() as conn:
-        return {"settings": accounts.settings(conn)}
+        return {"settings": settings.values(conn)}
 
 
 @app.post("/api/admin/settings")
 async def admin_set_setting(request: Request):
     admin = auth.require_admin(request)
     body = await request.json()
+    key = str(body.get("key") or "")
+    value = body.get("value")
     with db.transaction() as conn:
-        updated = accounts.set_setting(conn, admin, str(body.get("key") or ""), bool(body.get("value")))
+        try:
+            updated = settings.set_value(conn, admin, key, bool(value) if key in settings.FLAGS else value)
+        except ValueError as error:
+            raise HTTPException(400, str(error))
     return {"settings": updated}
 
 
@@ -440,16 +470,143 @@ def my_usage(request: Request):
         return {**state, "totals": usagelog.aggregate(conn, "all", None, user_id=user["id"])["totals"]}
 
 
+# ---------- connections (admins only) ----------
+
+def actor(request: Request) -> dict:
+    """The audit column wants a username, so the admin object is what acts here."""
+    return auth.require_admin(request)
+
+
+@app.get("/api/connections")
+def connection_list(request: Request):
+    admin = actor(request)
+    with db.transaction() as conn:
+        rows = connections.list_connections(conn)
+    for row in rows:
+        row["queue"] = connections.gate(row).state()
+    return {"connections": rows, "presets": {key: value["label"] for key, value in connections.PRESETS.items()}}
+
+
+@app.post("/api/connections")
+async def connection_create(request: Request):
+    admin = actor(request)
+    body = await request.json()
+    with db.transaction() as conn:
+        try:
+            return connections.create(conn, admin, body)
+        except ValueError as error:
+            raise HTTPException(400, str(error))
+
+
+@app.post("/api/connections/{connection_id}")
+async def connection_update(connection_id: int, request: Request):
+    admin = actor(request)
+    body = await request.json()
+    with db.transaction() as conn:
+        try:
+            return connections.update(conn, admin, connection_id, body)
+        except ValueError as error:
+            raise HTTPException(400, str(error))
+
+
+@app.delete("/api/connections/{connection_id}")
+async def connection_delete(connection_id: int, request: Request):
+    admin = actor(request)
+    with db.transaction() as conn:
+        try:
+            result = connections.delete(conn, admin, connection_id)
+        except ValueError as error:
+            raise HTTPException(409, str(error))
+    connections.GATES.pop(connection_id, None)
+    return {"ok": True, "note": f"Removed {result['name']} and {result['models_removed']} model rows."}
+
+
+@app.post("/api/connections/{connection_id}/test")
+async def connection_test(connection_id: int, request: Request):
+    """Run the checks one at a time and keep the result, so the row can show status badges."""
+    admin = actor(request)
+    body = await request.json() if (raw := await request.body()) else {}
+    with db.transaction() as conn:
+        try:
+            return await connections.test_connection(conn, connection_id, str(body.get("model") or ""))
+        except ValueError as error:
+            raise HTTPException(400, str(error))
+        except Exception as error:
+            raise HTTPException(502, f"Could not reach the connection: {error}")
+
+
+@app.post("/api/connections/{connection_id}/models")
+async def connection_add_model(connection_id: int, request: Request):
+    """Add a model by hand, for a server that does not list its models."""
+    admin = actor(request)
+    body = await request.json()
+    with db.transaction() as conn:
+        try:
+            return connections.add_model(conn, admin, connection_id, str(body.get("model_id") or ""), body)
+        except ValueError as error:
+            raise HTTPException(400, str(error))
+
+
+@app.post("/api/connections/{connection_id}/models/refresh")
+async def connection_refresh_models(connection_id: int, request: Request):
+    admin = actor(request)
+    with db.transaction() as conn:
+        try:
+            return await connections.refresh_models(conn, admin, connection_id)
+        except ValueError as error:
+            raise HTTPException(400, str(error))
+        except Exception as error:
+            raise HTTPException(502, f"Could not reach the connection: {error}")
+
+
+@app.post("/api/connections/models/{model_row_id}")
+async def connection_update_model(model_row_id: int, request: Request):
+    """Per model: display name, hidden, the capability flags, context length, its own overrides."""
+    admin = actor(request)
+    body = await request.json()
+    with db.transaction() as conn:
+        try:
+            return connections.update_model(conn, admin, model_row_id, body)
+        except ValueError as error:
+            raise HTTPException(400, str(error))
+
+
+@app.delete("/api/connections/models/{model_row_id}")
+async def connection_delete_model(model_row_id: int, request: Request):
+    admin = actor(request)
+    with db.transaction() as conn:
+        try:
+            result = connections.delete_model(conn, admin, model_row_id)
+        except ValueError as error:
+            raise HTTPException(400, str(error))
+    return {"ok": True, "note": f"Removed {result['model']}."}
+
+
 # ---------- conversations ----------
 
 @app.get("/api/models")
-async def models(request: Request):
-    auth.require(request)
-    try:
-        rows = await llm.list_models()
-    except Exception as error:
-        raise HTTPException(502, f"cannot reach {config.BASE_URL}: {error}")
-    return {"models": [row.get("id") for row in rows], "default": config.MODEL}
+def model_list(request: Request):
+    """The models this user may use, grouped by connection. Read from the stored list, not live.
+
+    A connection that is admins-only, or a model marked hidden, is not shown to a normal user.
+    """
+    user = auth.require(request)
+    with db.transaction() as conn:
+        groups = []
+        for connection in connections.list_connections(conn):
+            if not connection["enabled"]:
+                continue
+            if connection["visibility"] == "admins" and user["role"] != "admin":
+                continue
+            shown = [model for model in connection["models"] if not model["hidden"]]
+            if not shown:
+                continue
+            groups.append({"connection": {"id": connection["id"], "name": connection["name"],
+                                         "slug": connection["slug"], "label": connection["label"]},
+                           "models": shown})
+        return {"models": [model["namespaced"] for group in groups for model in group["models"]],
+                "groups": groups, "default": connections.default_model(conn),
+                "default_dream_model": connections.default_model(conn, "dream")}
 
 
 @app.get("/api/web")
@@ -461,16 +618,29 @@ def web_status(request: Request):
 
 @app.get("/api/conversations")
 def conversations(request: Request):
-    auth.require(request)
+    """The chat list. Each row also says whether a run is active in it and whether the result of a
+    finished run has not been seen yet, which is what the sidebar shows."""
+    user = auth.require(request)
     appdata.current().ensure()
-    return {"conversations": store.list_conversations()}
+    with db.transaction() as conn:
+        active = {entry["conversation_id"]: entry["id"] for entry in conn.execute(
+            f"SELECT conversation_id, id FROM runs WHERE user_id = ? AND status IN {runs.ACTIVE_TUPLE}",
+            (user["id"],)).fetchall()}
+        unread = set(runs.unread_for(conn, user["id"]))
+    rows = store.list_conversations()
+    for row in rows:
+        row["active_run_id"] = active.get(row["id"])
+        row["unread"] = row["id"] in unread
+    return {"conversations": rows}
 
 
 @app.post("/api/conversations")
 async def create_conversation(request: Request):
     user = auth.require(request)
     body = await request.json()
-    row = store.new_conversation(body.get("model") or config.MODEL, body.get("system") or "")
+    with db.transaction() as conn:
+        model = str(body.get("model") or "") or connections.default_model(conn)
+    row = store.new_conversation(model, body.get("system") or "")
     return {"conversation": row | {"user": user["username"]}}
 
 
@@ -492,129 +662,164 @@ async def title_conversation(cid: str, request: Request):
     row = store.get(cid)
     if row is None:
         raise HTTPException(404, "no such conversation")
-    return await titles.generate(user, cid, body.get("model") or row.get("model") or config.MODEL)
+    model = str(body.get("model") or row.get("model") or "")
+    with db.transaction() as conn:
+        resolved = connections.resolve(conn, model)
+    if resolved is None:
+        raise HTTPException(404, f"No connection for {model}.")
+    return await titles.generate(user, cid, model, target=connections.target(resolved["connection"]),
+                                connection_id=resolved["connection"]["id"])
 
 
 @app.delete("/api/conversations/{cid}")
 def delete_conversation(cid: str, request: Request):
-    auth.require(request)
+    user = auth.require(request)
+    if not store.get(cid):
+        raise HTTPException(404, "no such conversation")
+    with db.transaction() as conn:
+        cancelled = runs.cancel_for(conn, cid, "conversation")
     if not store.delete(cid):
         raise HTTPException(404, "no such conversation")
-    return {"ok": True}
+    return {"ok": True, "cancelled_runs": cancelled}
 
 
 @app.get("/api/conversations/{cid}/messages")
 def conversation_messages(cid: str, request: Request):
-    auth.require(request)
+    user = auth.require(request)
     row = store.get(cid)
     if row is None:
         raise HTTPException(404, "no such conversation")
-    return {"conversation": {**row, "title": store.title_for(row)}, "messages": store.messages_raw(cid)}
+    with db.transaction() as conn:
+        active = runs.active_for(conn, user["id"], cid)
+        last = runs.last_for(conn, user["id"], cid)
+        unavailable = bool(row.get("model")) and connections.resolve(conn, row["model"]) is None
+        runs.mark_seen(conn, user["id"], cid)
+    return {"conversation": {**row, "title": store.title_for(row)}, "messages": store.messages_raw(cid),
+            "active_run_id": active["id"] if active else None,
+            "active_run": active, "last_run": last, "model_unavailable": unavailable}
 
 
-@app.post("/api/chat/stop")
-async def stop_generation(request: Request):
-    auth.require(request)
-    body = await request.json()
-    STOP.add(body.get("conversation_id") or "")
-    return {"ok": True}
+def run_params(body: dict, model: str) -> dict:
+    """What a run needs to run a turn. The same fields the chat page sends."""
+    return {
+        "message": str(body.get("message") or ""),
+        "model": model,
+        "system": str(body.get("system") or ""),
+        "temperature": float(body.get("temperature", 0.7)),
+        "wiki_index": bool(body.get("wiki_index", True)),
+        "regenerate": bool(body.get("regenerate")),
+        "reasoning_effort": body.get("reasoning_effort") or reasoning.settings().get("default_level", "medium"),
+        "web": bool(body.get("web_search")),
+        "generate_titles": bool(body.get("generate_titles")),
+    }
 
 
-async def chat_stream(user: dict, cid: str, message: str, model: str, system: str, temperature: float,
-                     inject_index: bool = True, regenerate: bool = False,
-                     effort: str = "medium", web: bool = False):
-    mapping = reasoning.resolve(model, effort)
-    tools = agent.TOOLS + agent.WEB_TOOLS if web else agent.TOOLS
+@app.post("/api/conversations/{cid}/messages")
+async def create_run(cid: str, request: Request):
+    """Create a run and answer immediately. The turn keeps running when this request ends.
 
-    def record(block: dict, estimated: bool) -> None:
-        with db.transaction() as conn:
-            usagelog.record(conn, user["id"], block, "chat", model, cid, estimated)
-
-    def blocked():
-        with db.transaction() as conn:
-            return limits.check(conn, user)
-
-    if not regenerate:
-        store.append(cid, {"role": "user", "content": message})
-    messages = [{"role": "system", "content": system_prompt(system, inject_index, mapping["system"], web)}] + store.messages(cid)
-
-    content = ""
-    reasoning_text = ""
-    started = time.monotonic()
-
-    def save(partial: bool = False, tool_calls: list | None = None, note: str | None = None) -> None:
-        record_entry = {"role": "assistant", "content": content or None}
-        if reasoning_text:
-            record_entry["reasoning"] = reasoning_text
-            record_entry["reasoning_ms"] = int((time.monotonic() - started) * 1000)
-        # The level used for this turn, kept for later analysis. Not sent back to the model.
-        record_entry["reasoning_effort"] = mapping["level"]
-        # The tool calls of this step, so the transcript shows what the model actually asked for.
-        if tool_calls:
-            record_entry["tool_calls"] = tool_calls
-        # Only the note for a missing answer, and only on the final step. An intermediate step with
-        # thinking and a tool call has no answer text by design, so nothing is written for it.
-        if note:
-            record_entry["note"] = note
-        if partial:
-            record_entry["stopped"] = True
-        if content or reasoning_text or tool_calls:
-            store.append(cid, record_entry)
-
-    try:
-        async for event in agent.run_loop(messages, model, temperature, mapping=mapping,
-                                         on_usage=record, limit_check=blocked,
-                                         tools=tools, user_id=user["id"]):
-            if cid in STOP:
-                save(partial=True)
-                yield sse({"type": "stopped"})
-                break
-            if event["type"] in ("delta", "reasoning", "usage", "limit_reached"):
-                yield sse(event)
-            elif event["type"] == "assistant_message":
-                content = event["content"]
-                reasoning_text = event["reasoning"]
-                save(tool_calls=event["tool_calls"], note=event.get("note"))
-                yield sse({"type": "assistant_message", "content": content, "reasoning": reasoning_text,
-                           "reasoning_ms": event["reasoning_ms"], "reasoning_only": event["reasoning_only"],
-                           "note": event.get("note"), "reasoning_effort": mapping["level"],
-                           "tool_calls": event["tool_calls"]})
-            elif event["type"] == "tool":
-                store.append(cid, {"role": "tool", "tool_call_id": event.get("id"), "name": event["name"],
-                                   "arguments": event["arguments"],
-                                   "content": json.dumps(event["result"], ensure_ascii=False)})
-                yield sse(event)
-    except asyncio.CancelledError:
-        save(partial=True)
-        yield sse({"type": "stopped"})
-    finally:
-        STOP.discard(cid)
-
-
-@app.post("/api/chat")
-async def chat(request: Request):
+    A second message while a run is active in the same chat is refused, because two answers in one
+    conversation would not be in order. The Stop button calls /api/runs/<id>/cancel.
+    """
     user = auth.require(request)
     body = await request.json()
-    cid = body.get("conversation_id")
-    if not store.get(cid):
+    row = store.get(cid)
+    if row is None:
         raise HTTPException(404, "no such conversation")
 
-    # Check before the turn starts. A response that is already streaming may finish, so the
-    # overshoot is at most one response; the usage for it is recorded afterwards.
     with db.transaction() as conn:
-        blocked = limits.check(conn, user)
-    if blocked:
-        return JSONResponse(blocked, status_code=429)
+        active = runs.active_for(conn, user["id"], cid)
+        if active:
+            return JSONResponse({"detail": "This chat is still generating. Stop that run first, or wait "
+                                           "for it to finish.", "run_id": active["id"]}, status_code=409)
 
-    return StreamingResponse(
-        chat_stream(user, cid, body.get("message", ""), body.get("model") or config.MODEL,
-                    body.get("system") or "", float(body.get("temperature", 0.7)),
-                    bool(body.get("wiki_index", True)), bool(body.get("regenerate")),
-                    body.get("reasoning_effort") or reasoning.settings().get("default_level", "medium"),
-                    bool(body.get("web_search"))),
-        media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
-    )
+        # Checked before the run starts, as before; the same check runs again inside the loop.
+        blocked = limits.check(conn, user)
+        if blocked:
+            return JSONResponse(blocked, status_code=429)
+
+        model = str(body.get("model") or row.get("model") or "")
+        params = run_params(body, model)
+        try:
+            run = runs.create(conn, user, cid, params)
+        except ValueError as error:
+            return JSONResponse({"detail": str(error)}, status_code=409)
+
+    runs.start(run)
+    return JSONResponse({"run_id": run.id, "run": run.status_row()}, status_code=202)
+
+
+@app.get("/api/runs/{run_id}")
+def get_run(run_id: str, request: Request):
+    user = auth.require(request)
+    with db.transaction() as conn:
+        stored = runs.row(conn, run_id)
+    if stored is None or stored["user_id"] != user["id"]:
+        raise HTTPException(404, "no such run")
+    return {"run": stored}
+
+
+@app.post("/api/runs/{run_id}/cancel")
+async def cancel_run(run_id: str, request: Request):
+    """The only way a run stops. A dropped SSE connection does not cancel anything."""
+    user = auth.require(request)
+    with db.transaction() as conn:
+        result = runs.cancel(conn, run_id, user["id"])
+    if result is None:
+        raise HTTPException(404, "no such run")
+    return {"run": result}
+
+
+def last_event_id(request: Request, after: int) -> int:
+    """Where to start replaying: the `after` query, or the browser's Last-Event-ID on a reconnect."""
+    header = request.headers.get("last-event-id") or ""
+    if header.strip().isdigit():
+        return int(header)
+    return int(after or 0)
+
+
+@app.get("/api/runs/{run_id}/events")
+async def run_events(run_id: str, request: Request, after: int = 0):
+    """Replay the run's events from `after`, then continue live.
+
+    Subscribing first is what makes this gap-free: an event that arrives while the replay is being
+    written goes to both the buffer and the queue, so the queue part skips anything already sent.
+    A client that comes back after the run is finished reads the transcript instead.
+    """
+    user = auth.require(request)
+    with db.transaction() as conn:
+        stored = runs.row(conn, run_id)
+    if stored is None or stored["user_id"] != user["id"]:
+        raise HTTPException(404, "no such run")
+
+    run = runs.get(run_id)
+    if run is None:
+        # Not in this process. Nothing to stream: the transcript is the record.
+        return JSONResponse({"run": stored, "replay": False,
+                            "note": "This run is not in memory. Read the conversation instead."})
+
+    return StreamingResponse(stream_run(run, last_event_id(request, after)),
+                             media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+async def stream_run(run: runs.Run, after: int) -> AsyncIterator[str]:
+    queue = run.subscribe()
+    sent = after
+    try:
+        for record in run.events_from(after):
+            sent = record["id"]
+            yield sse(record["payload"], record["id"])
+        while run.status in runs.ACTIVE:
+            record = await queue.get()
+            if record["id"] <= sent:
+                continue
+            sent = record["id"]
+            yield sse(record["payload"], record["id"])
+        for record in run.events_from(sent):
+            yield sse(record["payload"], record["id"])
+    finally:
+        run.unsubscribe(queue)
 
 
 # ---------- wiki ----------
