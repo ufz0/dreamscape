@@ -1,0 +1,115 @@
+/* Admin panel: the tables, the period controls, and the usage chart.
+   Everything here is built on the variables and shapes already in styles.css, so light and dark
+   both work without hard-coding a colour. */
+
+.admin-view { flex: 1; min-height: 0; overflow-y: auto; padding: 4px 24px 24px; max-width: 1040px; }
+
+/* Chart colours, derived from the theme so the chart follows whatever the page is wearing. */
+.admin-view {
+  --chart-1: var(--accent);
+  --chart-2: var(--warn);
+  --chart-3: var(--ok);
+  --chart-4: var(--graph-node);
+  --chart-5: color-mix(in srgb, var(--accent) 40%, var(--panel));
+  --chart-6: color-mix(in srgb, var(--graph-node) 55%, var(--panel));
+}
+
+/* What the page has to say up front: counts, never chat content. */
+.admin-note { margin: 0 24px 8px; font-size: 13.5px; color: var(--muted); }
+
+.admin-status { margin: 0 24px 12px; font-size: 13.5px; color: var(--accent); }
+.admin-status:empty { display: none; }
+.admin-status.error { color: var(--danger); }
+
+.admin-toolbar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 14px; }
+.admin-toolbar .spacer { flex: 1; }
+.admin-view > section { margin-top: 22px; }
+.admin-view h2 { font-size: 14px; margin: 0 0 4px; }
+
+/* The period navigator. The chevron icon points right, so the previous button turns it around. */
+.period-nav { display: inline-flex; align-items: center; gap: 6px; }
+.period-nav .value { font-family: var(--mono); font-size: 13px; min-width: 120px; text-align: center; }
+.period-nav .prev svg { transform: rotate(180deg); }
+
+/* ---------- tables ---------- */
+
+.table-wrap { overflow-x: auto; }
+
+.admin-table { border-collapse: collapse; width: 100%; font-size: 13.5px; }
+.admin-table th { text-align: left; font-size: 12px; font-weight: 600; color: var(--muted); padding: 8px 8px; border-bottom: 1px solid var(--border); white-space: nowrap; }
+.admin-table td { padding: 6px 8px; border-bottom: 1px solid var(--border); }
+.admin-table .value { font-family: var(--mono); font-size: 12.5px; white-space: nowrap; }
+.admin-table .name { font-family: var(--mono); font-size: 13px; }
+.admin-table .action { font-family: var(--mono); font-size: 11.5px; color: var(--muted); }
+
+/* A value shown in a dialog uses the same mono figures as the tables. */
+.dialog .value { font-family: var(--mono); font-size: 14px; }
+
+/* A role badge is the status badge from styles.css, but it states a role rather than a live state,
+   so it does not shimmer. */
+.status.role { color: var(--accent); background: color-mix(in srgb, var(--accent) 14%, transparent); animation: none; }
+
+/* A header that sorts is a button, not a label; the arrow only appears on the active column. */
+.admin-table th button { font: inherit; color: inherit; padding: 2px 6px; border-radius: 6px; text-align: left; }
+.admin-table th button:hover { background: var(--hover); color: var(--text); }
+.admin-table th[aria-sort] button { color: var(--text); }
+.admin-table th .arrow { display: none; color: var(--accent); }
+.admin-table th[aria-sort] .arrow { display: inline; }
+
+/* The row menu is normally only shown on hover inside the chat list; here it is always reachable. */
+.admin-table .row-menu { display: inline-flex; }
+
+/* A username in the usage table is also the chart filter. */
+.user-link { font-family: var(--mono); font-size: 13px; color: var(--text); padding: 2px 4px; border-radius: 6px; }
+.user-link:hover { background: var(--hover); color: var(--accent); }
+.user-link.active { color: var(--accent); }
+
+/* A limit is edited in place: empty means no limit, and 100k / 1.5m are accepted. */
+.limit { display: flex; align-items: center; gap: 6px; }
+.limit input {
+  width: 84px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg);
+  padding: 5px 8px; font-family: var(--mono); font-size: 12.5px;
+}
+.limit .result { font-family: var(--mono); font-size: 11.5px; color: var(--muted); }
+.limit .result.saved { color: var(--ok); }
+.limit .result.error { color: var(--danger); }
+
+/* The share bar is the usage bar from styles.css, in the calmer graph colour. */
+.usage-bar.share { min-width: 90px; }
+.usage-bar.share .fill { background: var(--graph-node); }
+
+.window { display: flex; align-items: center; gap: 8px; }
+
+/* ---------- the chart ---------- */
+
+.chart-box { margin-top: 22px; border-top: 1px solid var(--border); padding-top: 12px; }
+#chart svg { display: block; width: 100%; height: auto; }
+
+/* Flat fills, no gradients: chat is the accent, dreaming the warning tone, users the graph tones. */
+#chart .bar { fill: var(--chart-1); }
+#chart .dreaming { fill: var(--chart-2); }
+#chart .u0 { fill: var(--chart-1); }
+#chart .u1 { fill: var(--chart-2); }
+#chart .u2 { fill: var(--chart-3); }
+#chart .u3 { fill: var(--chart-4); }
+#chart .u4 { fill: var(--chart-5); }
+#chart .u5 { fill: var(--chart-6); }
+
+#chart .axis { stroke: var(--border); stroke-width: 1; }
+#chart .grid { stroke: var(--border); stroke-width: 1; stroke-dasharray: 3 4; }
+#chart text { font-family: var(--mono); font-size: 11px; fill: var(--muted); }
+#chart g:hover rect { opacity: 0.85; }
+
+/* ---------- small screens ---------- */
+
+@media (max-width: 768px) {
+  .admin-view, .admin-note, .admin-status { padding-left: 14px; padding-right: 14px; }
+  .admin-view { padding-top: 0; }
+  .admin-toolbar { gap: 8px; }
+  .period-nav { flex: 1; }
+  .period-nav .value { min-width: 90px; }
+  .field label { font-size: 13px; }
+  .field select { max-width: 150px; }
+  .limit input { width: 70px; }
+  .chart-box { margin-top: 16px; }
+}

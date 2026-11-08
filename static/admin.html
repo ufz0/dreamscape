@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>dreamscape — admin</title>
+  <link rel="icon" href="/static/favicon.ico" sizes="any">
+  <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="/static/apple-touch-icon.png">
+  <link rel="manifest" href="/static/site.webmanifest">
+  <meta name="theme-color" content="#faf9f5">
+  <link rel="stylesheet" href="/static/styles.css">
+  <link rel="stylesheet" href="/static/admin.css">
+</head>
+<body>
+  <div class="app">
+    <div class="scrim" id="scrim" hidden></div>
+
+    <aside class="sidebar" id="sidebar" aria-label="Sidebar">
+      <div class="side-head">
+        <a class="brand" href="/" title="dreamscape">
+          <span class="mark" data-icon="logo" data-size="20"></span>
+          <strong class="wordmark">dreamscape</strong>
+        </a>
+        <button class="icon-btn" id="collapse" data-icon="panel" title="Collapse sidebar" aria-label="Collapse sidebar"></button>
+      </div>
+
+      <button class="new-chat" id="new-chat" title="New chat (Control+Shift+O)">
+        <span class="plus" data-icon="plus" data-size="13"></span>
+        <span class="label">New chat</span>
+        <kbd>Ctrl Shift O</kbd>
+      </button>
+
+      <nav aria-label="Sections">
+        <a class="nav-row" href="/" title="Chats">
+          <span data-icon="chat" data-size="18"></span><span class="label">Chats</span>
+        </a>
+        <a class="nav-row" href="/wiki" title="Wiki">
+          <span data-icon="book" data-size="18"></span><span class="label">Wiki</span>
+        </a>
+        <a class="nav-row active" href="/admin" id="nav-admin" title="Admin">
+          <span data-icon="gear" data-size="18"></span><span class="label">Admin</span>
+        </a>
+      </nav>
+
+      <div class="side-search">
+        <span data-icon="search" data-size="16"></span>
+        <input id="search" type="search" placeholder="Search chats" aria-label="Search chats">
+      </div>
+
+      <div class="side-list" id="chat-list" aria-label="Recent chats"></div>
+
+      <div class="side-foot">
+        <button class="user-row" id="user-menu" aria-label="Account menu" title="Account">
+          <span class="avatar" id="avatar">?</span>
+          <span class="who" id="who">account</span>
+          <span data-icon="caret" data-size="14"></span>
+        </button>
+      </div>
+    </aside>
+
+    <main class="main">
+      <header class="topbar">
+        <button class="icon-btn hamburger" id="hamburger" data-icon="menu" title="Open sidebar" aria-label="Open sidebar"></button>
+        <span class="chat-title static">Admin</span>
+        <div class="tabs" role="tablist" aria-label="Admin view">
+          <button class="tab on" id="tab-users" role="tab" aria-selected="true">Users</button>
+          <button class="tab" id="tab-usage" role="tab" aria-selected="false">Usage</button>
+        </div>
+      </header>
+
+      <p class="admin-note">Admins can see usage numbers, not chat content.</p>
+      <p class="admin-status" id="admin-status" aria-live="polite"></p>
+
+      <section class="admin-view" id="users-view" aria-label="Users">
+        <div class="admin-toolbar">
+          <button class="small-button" id="create-user" title="Create a new account">Create user</button>
+          <span class="spacer"></span>
+        </div>
+
+        <div class="field">
+          <label for="allow-self-registration">Allow self-registration</label>
+          <input id="allow-self-registration" type="checkbox">
+        </div>
+
+        <div class="table-wrap">
+          <table class="admin-table" aria-label="Accounts">
+            <thead>
+              <tr>
+                <th>User</th>
+                <th>Role</th>
+                <th>Status</th>
+                <th>Created</th>
+                <th>Last login</th>
+                <th>Tokens in period</th>
+                <th>Daily limit</th>
+                <th>Weekly limit</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody id="user-rows"></tbody>
+          </table>
+        </div>
+
+        <section class="audit-box">
+          <h2>Recent admin actions</h2>
+          <p class="muted">The last 50 changes made here, newest first.</p>
+          <div class="table-wrap">
+            <table class="admin-table" aria-label="Audit log">
+              <thead>
+                <tr><th>Who</th><th>Action</th><th>Target</th><th>Detail</th><th>When</th></tr>
+              </thead>
+              <tbody id="audit-rows"></tbody>
+            </table>
+          </div>
+        </section>
+      </section>
+
+      <section class="admin-view" id="usage-view" hidden aria-label="Usage">
+        <div class="admin-toolbar">
+          <div class="segmented" id="period" role="group" aria-label="Period"></div>
+          <div class="period-nav">
+            <button class="icon-btn prev" id="prev-period" data-icon="chevron" title="Previous period" aria-label="Previous period"></button>
+            <span class="value" id="period-label"></span>
+            <button class="icon-btn" id="next-period" data-icon="chevron" title="Next period" aria-label="Next period"></button>
+            <button class="small-button" id="this-period" title="Jump back to the current period">Now</button>
+          </div>
+          <span class="spacer"></span>
+          <div class="field">
+            <label for="user-filter">Chart for one user</label>
+            <select id="user-filter"></select>
+          </div>
+          <button class="small-button" id="stacked" aria-pressed="false">Stacked by user</button>
+          <button class="small-button" id="export-csv" title="Download the table you are looking at">Export CSV</button>
+        </div>
+
+        <div class="usage-block" id="totals"></div>
+
+        <div class="table-wrap">
+          <table class="admin-table" aria-label="Usage per user">
+            <thead id="usage-head"></thead>
+            <tbody id="usage-rows"></tbody>
+          </table>
+        </div>
+
+        <div class="chart-box">
+          <div id="chart"></div>
+          <div class="legend" id="chart-legend"></div>
+          <p class="muted" id="chart-caption"></p>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <script type="module" src="/static/js/admin.js"></script>
+</body>
+</html>
