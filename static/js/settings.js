@@ -32,8 +32,8 @@ export function applyTheme(settings) {
   else document.documentElement.dataset.theme = settings.theme;
 }
 
-export function greeting(settings) {
+export function greeting(settings, name) {
   const hour = new Date().getHours();
   const part = hour < 12 ? "morning" : hour < 18 ? "afternoon" : "evening";
-  return `Good ${part}, ${settings.name || "there"}`;
+  return `Good ${part}, ${name || settings.name || "there"}`;
 }

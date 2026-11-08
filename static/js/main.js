@@ -7,6 +7,7 @@ import { settings, startShell, renderList, setActiveChat, currentModel, loadMode
   controlRow, numberInput, textArea, checkbox } from "./shell.js";
 import { save } from "./settings.js";
 import { effortFor, openEffort, paintEffort, remember, clearPending } from "./effort.js";
+import { account, mustChange } from "./account.js";
 
 const el = (id) => document.getElementById(id);
 const ui = {
@@ -19,12 +20,43 @@ const ui = {
 let chatId = null;
 let generating = false;
 let controller = null;
+let limitUntil = null;   // when a reached token limit resets; sending stays off until then
 
 const view = new ChatView(ui.thread, settings, {
   jumpButton: ui.jump,
   onRetry: () => regenerate(),
   onEdit: (text) => { ui.input.value = text; grow(); ui.input.focus(); },
+  onLimit: (info) => pauseUntil(info),
 });
+
+function pauseUntil(info) {
+  if (!info) return;
+  const resets = new Date(info.resets_at);
+  limitUntil = Number.isFinite(resets.getTime()) ? resets : null;
+  ui.input.placeholder = "Sending is paused until the limit resets.";
+  refreshSendButton();
+  if (limitUntil) {
+    setTimeout(() => {
+      limitUntil = null;
+      ui.input.placeholder = ui.thread.querySelector(".msg") ? "Reply..." : "How can I help you today?";
+      refreshSendButton();
+    }, Math.max(0, limitUntil.getTime() - Date.now()));
+  }
+}
+
+// A reached limit is stated in the same words the server answers with, where it can be seen:
+// in the conversation, or under the greeting when the chat is still empty.
+function showLimitNotice(info) {
+  if (!ui.main.classList.contains("empty")) {
+    view.showLimit(info);
+    return;
+  }
+  const note = document.createElement("p");
+  note.className = "note limit";
+  note.textContent = info.message;
+  ui.greeting.closest(".greeting").append(note);
+  pauseUntil(info);
+}
 
 // ---------- views ----------
 
@@ -32,7 +64,9 @@ function showConversation(hasMessages) {
   ui.main.classList.toggle("empty", !hasMessages);
   ui.topbar.hidden = !chatId;
   ui.disclaimer.hidden = !hasMessages;
-  ui.input.placeholder = hasMessages ? "Reply..." : "How can I help you today?";
+  ui.input.placeholder = limitUntil
+    ? "Sending is paused until the limit resets."
+    : (hasMessages ? "Reply..." : "How can I help you today?");
 }
 
 function newChat() {
@@ -147,6 +181,7 @@ function grow() {
 
 function refreshSendButton() {
   if (generating) return;
+  if (limitUntil || mustChange()) { ui.send.disabled = true; return; }
   ui.send.disabled = !ui.input.value.trim();
 }
 
@@ -178,6 +213,7 @@ ui.send.addEventListener("click", () => {
 async function send(text, regenerate = false) {
   text = (text || "").trim();
   if (!text || generating) return;
+  if (limitUntil || mustChange()) return;
 
   const level = effortFor(chatId);
   if (!chatId) {
@@ -215,7 +251,12 @@ async function send(text, regenerate = false) {
       reasoning_effort: level,
     }, (event) => view.handle(event), controller.signal);
   } catch (error) {
-    if (error.name !== "AbortError") toast(`Request failed: ${error.message}`);
+    if (error.status === 429) {
+      view.removeLastMessage();
+      view.showLimit(error.body);
+    } else if (error.name !== "AbortError") {
+      toast(`Request failed: ${error.message}`);
+    }
   } finally {
     setGenerating(false);
     controller = null;
@@ -318,11 +359,10 @@ async function start() {
     onDelete: (id) => { if (id === chatId) newChat(); },
     onModelChange: paintModel,
     onEffortChange: () => paintEffort(ui.effort, currentModel(), chatId),
-    onNameChange: () => { ui.greeting.textContent = greeting(settings); },
   });
 
   buildPills();
-  ui.greeting.textContent = greeting(settings);
+  ui.greeting.textContent = greeting(settings, account().user ? account().user.username : "");
   await loadModels();
   paintModel();
   grow();
@@ -330,6 +370,13 @@ async function start() {
   const id = new URLSearchParams(location.search).get("c");
   if (id) await openChat(id);
   else newChat();
+
+  // A limit that is already reached is shown before the first request, in the same wording the
+  // server would answer with, and sending stays off until it resets.
+  for (const window of (account() && account().usage && account().usage.windows) || []) {
+    if (window.reached) showLimitNotice(window);
+  }
+
   ui.input.focus();
 }
 

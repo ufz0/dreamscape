@@ -1,8 +1,9 @@
-// Shared chrome for both pages: theme, sidebar, chat list, settings dialog.
+// Shared chrome for both pages: theme, sidebar, chat list, the account popup, settings dialog.
 import { api } from "./api.js";
 import { icon } from "./icons.js";
-import { openMenu, openDialog, toast } from "./ui.js";
+import { openMenu, openPanel, openDialog, closePopups, toast } from "./ui.js";
 import { load, save, applyTheme, greeting } from "./settings.js";
+import { loadMe, account, mustChange, initial, readUsage, usageBlock, openChangePassword, logout } from "./account.js";
 
 export const settings = load();
 
@@ -40,14 +41,28 @@ export async function startShell(options) {
   hooks = options;
   ui = {
     sidebar: el("sidebar"), scrim: el("scrim"), list: el("chat-list"), search: el("search"),
-    avatar: el("avatar"), settings: el("settings"), newChat: el("new-chat"),
+    userMenu: el("user-menu"), avatar: el("avatar"), who: el("who"), newChat: el("new-chat"),
     collapse: el("collapse"), hamburger: el("hamburger"),
   };
 
   paintIcons();
   applyTheme(settings);
   applySidebar();
-  ui.avatar.textContent = (settings.name || "L").charAt(0).toUpperCase();
+
+  try {
+    await loadMe();
+  } catch (error) {
+    if (error.status === 401) return;   // api() already redirected to /login
+    toast(`Cannot read the account: ${error.message}`);
+    return;
+  }
+
+  const user = account().user;
+  ui.avatar.textContent = initial(user.username);
+  ui.who.textContent = user.username;
+
+  ui.userMenu.addEventListener("click", () => openUserMenu(ui.userMenu));
+  if (mustChange()) openChangePassword({ required: true });
 
   ui.newChat.addEventListener("click", () => {
     if (hooks.onNewChat) hooks.onNewChat();
@@ -59,7 +74,6 @@ export async function startShell(options) {
     save(settings);
     applySidebar();
   });
-  ui.settings.addEventListener("click", openSettings);
   ui.hamburger.addEventListener("click", openDrawer);
   ui.scrim.addEventListener("click", closeDrawer);
   ui.search.addEventListener("input", () => renderList());
@@ -73,6 +87,37 @@ export async function startShell(options) {
   });
 
   await renderList();
+}
+
+// ---------- account popup ----------
+
+// The numbers are read again when the popup opens, so they are the current day and not what
+// happened to be loaded when the page was opened.
+async function openUserMenu(anchor) {
+  const usage = await readUsage();
+  openPanel(anchor, (panel) => {
+    panel.classList.add("account-panel");
+    const user = account().user;
+
+    panel.append(usageBlock(usage, { showReset: true }));
+    panel.append(document.createElement("hr"));
+
+    for (const item of [
+      { label: "Settings", action: openSettings },
+      ...(user.role === "admin" ? [{ label: "Admin", action: () => { window.location.href = "/admin"; } }] : []),
+      { label: "Change password", action: () => openChangePassword({ required: mustChange() }) },
+      { separator: true },
+      { label: "Log out", danger: true, action: logout },
+    ]) {
+      if (item.separator) { panel.append(document.createElement("hr")); continue; }
+      const button = document.createElement("button");
+      button.setAttribute("role", "menuitem");
+      if (item.danger) button.classList.add("danger");
+      button.textContent = item.label;
+      button.addEventListener("click", () => { closePopups(); item.action(); });
+      panel.append(button);
+    }
+  });
 }
 
 export function setActiveChat(id) {
@@ -203,7 +248,8 @@ function closeDrawer() {
 
 // ---------- settings dialog ----------
 
-export function openSettings() {
+export async function openSettings() {
+  const usage = await readUsage();
   openDialog("Settings", (card) => {
     card.append(section("Appearance", segmented(["system", "light", "dark"], settings.theme, (value) => {
       settings.theme = value;
@@ -211,12 +257,7 @@ export function openSettings() {
       applyTheme(settings);
     })));
 
-    card.append(section("Name", textField(settings.name, "local", (value) => {
-      settings.name = value;
-      save(settings);
-      ui.avatar.textContent = (settings.name || "L").charAt(0).toUpperCase();
-      if (hooks.onNameChange) hooks.onNameChange(settings.name);
-    })));
+    card.append(section("Your account", usageBlock(usage, { showReset: true })));
 
     card.append(section("Defaults",
       controlRow("Model", modelSelect((value) => {

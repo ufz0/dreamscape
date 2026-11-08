@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>dreamscape — log in</title>
+  <link rel="icon" href="/static/favicon.ico" sizes="any">
+  <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="/static/apple-touch-icon.png">
+  <link rel="manifest" href="/static/site.webmanifest">
+  <meta name="theme-color" content="#faf9f5">
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body class="auth-page" data-mode="{{mode}}" data-next="{{next}}" data-register="{{register}}">
+  <div class="auth-card">
+    <div class="brand">
+      <span class="mark" data-icon="logo" data-size="20"></span>
+      <strong>dreamscape</strong>
+    </div>
+
+    <h1>{{heading}}</h1>
+    <p class="note">{{note}}</p>
+
+    <form id="form">
+      <label for="username">Username</label>
+      <input id="username" name="username" type="text" autocomplete="username"
+             pattern="[a-z0-9._-]{3,32}" required>
+      <label for="password">Password</label>
+      <input id="password" name="password" type="password" autocomplete="current-password" minlength="10" required>
+      <button class="submit" type="submit">{{button}}</button>
+    </form>
+
+    <p class="status" id="status" aria-live="polite"></p>
+    <p class="auth-links" id="links"></p>
+  </div>
+
+  <script type="module" src="/static/js/auth.js"></script>
+</body>
+</html>

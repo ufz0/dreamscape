@@ -136,6 +136,7 @@ export class ChatView {
     this.settings = settings;
     this.onRetry = options.onRetry;
     this.onEdit = options.onEdit;
+    this.onLimit = options.onLimit;
     this.jumpButton = options.jumpButton;
     this.stickToBottom = true;
 
@@ -368,7 +369,22 @@ export class ChatView {
     }
     if (event.type === "limit") {
       this.current.append(note(`Tool loop stopped at ${event.iterations} iterations.`));
+      return;
     }
+    if (event.type === "limit_reached") {
+      this.showLimit(event);
+    }
+  }
+
+  // A token limit is a plain notice, not an error code: what happened, which limit, when it resets.
+  showLimit(info) {
+    if (!info) return;
+    const message = document.createElement("p");
+    message.className = "note limit";
+    message.textContent = info.message || `Token limit reached (${info.window}).`;
+    this.container.append(message);
+    if (this.stickToBottom) this.scrollToBottom();
+    if (this.onLimit) this.onLimit(info);
   }
 
   ensureTextBlock() {
