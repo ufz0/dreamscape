@@ -34,11 +34,23 @@ export function openMenu(anchor, items) {
 
   for (const item of items) {
     if (item.separator) { menu.appendChild(document.createElement("hr")); continue; }
+    if (item.note) {
+      // A line that explains the list. It is not a choice, so it is not focusable.
+      const line = document.createElement("p");
+      line.className = "menu-note";
+      line.textContent = item.note;
+      menu.append(line);
+      continue;
+    }
     const button = document.createElement("button");
     button.setAttribute("role", "menuitem");
     if (item.danger) button.classList.add("danger");
     if (item.checked) button.classList.add("checked");
-    button.innerHTML = `<span class="tick">${item.checked ? icon("check", 16) : ""}</span><span>${item.label}</span>`;
+    button.dataset.type = String(item.label).toLowerCase();
+    button.innerHTML = `<span class="tick">${item.checked ? icon("check", 16) : ""}</span>` +
+      `<span class="item-text"><span class="item-label">${item.label}</span>` +
+      (item.description ? `<span class="item-desc">${item.description}</span>` : "") +
+      `</span>`;
     button.addEventListener("click", () => { closePopups(); item.action?.(); });
     menu.appendChild(button);
   }
@@ -91,6 +103,12 @@ document.addEventListener("keydown", (event) => {
   const index = items.indexOf(document.activeElement);
   if (event.key === "ArrowDown") { event.preventDefault(); items[(index + 1) % items.length]?.focus(); }
   if (event.key === "ArrowUp") { event.preventDefault(); items[(index - 1 + items.length) % items.length]?.focus(); }
+  // Type-ahead: a letter jumps to the row that starts with it.
+  if (event.key.length === 1 && !event.metaKey && !event.ctrlKey && !event.altKey && !event.repeat) {
+    const letter = event.key.toLowerCase();
+    const match = items.find((item) => (item.dataset.type || "").startsWith(letter));
+    if (match) { event.preventDefault(); match.focus(); }
+  }
 });
 
 let dialog = null;

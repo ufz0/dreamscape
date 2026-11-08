@@ -1,7 +1,7 @@
-// Reasoning effort control: a small button in the composer that opens a four-step slider.
+// Reasoning effort control: a small button in the composer that opens the level menu.
 // The last choice is remembered per conversation; new chats start from the Settings default.
 import { api } from "./api.js";
-import { openPanel } from "./ui.js";
+import { openMenu } from "./ui.js";
 import { settings } from "./shell.js";
 
 const LEVELS = ["none", "low", "medium", "high"];
@@ -59,67 +59,32 @@ export function paintEffort(button, model, chatId) {
   button.title = `Reasoning effort: ${effortFor(chatId)} (${DESCRIPTIONS[effortFor(chatId)]})`;
 }
 
-export function openEffort(button, model, chatId, onChange) {
-  openPanel(button, async (panel) => {
-    const data = await mapping(model);
-    const levels = data.levels && data.levels.length ? data.levels : LEVELS.map((level) => ({
-      level, label: capitalize(level), description: DESCRIPTIONS[level], approximated: true,
-    }));
+// One row per level: the name, what it does, and a check on the one in use. Arrow keys, Enter,
+// Esc and type-ahead work through the shared menu.
+export async function openEffort(button, model, chatId, onChange) {
+  const data = await mapping(model);
+  const levels = data.levels && data.levels.length ? data.levels : LEVELS.map((level) => ({
+    level, label: capitalize(level), description: DESCRIPTIONS[level], approximated: true,
+  }));
+  const current = effortFor(chatId);
 
-    const current = effortFor(chatId);
-    const index = Math.max(0, levels.findIndex((item) => item.level === current));
-
-    const stops = document.createElement("div");
-    stops.className = "effort-stops";
-    for (const level of levels) {
-      const stop = document.createElement("button");
-      stop.textContent = level.label;
-      stop.setAttribute("aria-pressed", String(level.level === current));
-      stop.addEventListener("click", () => pick(level.level));
-      stops.append(stop);
-    }
-
-    const slider = document.createElement("input");
-    slider.type = "range";
-    slider.min = "0";
-    slider.max = String(levels.length - 1);
-    slider.step = "1";
-    slider.value = String(index);
-    slider.setAttribute("aria-label", "Reasoning effort");
-    slider.addEventListener("input", () => pick(levels[Number(slider.value)].level));
-
-    const description = document.createElement("p");
-    description.className = "effort-description";
-
-    const note = document.createElement("p");
-    note.className = "effort-note";
-    const approximated = levels.some((level) => level.approximated);
-    if (approximated || data.note) {
-      note.hidden = false;
-      note.textContent = data.note || "Effort is approximated via prompt for this model";
-    }
-
-    function pick(level) {
-      const position = levels.findIndex((item) => item.level === level);
-      const chosen = levels[position] || { level, label: capitalize(level), description: DESCRIPTIONS[level] };
-      remember(chatId, level);
-      [...stops.children].forEach((stop, index) => {
-        stop.classList.toggle("on", index === position);
-        stop.setAttribute("aria-pressed", String(index === position));
-      });
-      slider.value = String(position);
-      slider.setAttribute("aria-valuetext", `${chosen.label} — ${chosen.description}`);
-      description.textContent = `${chosen.label} — ${chosen.description}`;
+  const items = levels.map((level) => ({
+    label: level.label,
+    description: level.description || DESCRIPTIONS[level.level] || "",
+    checked: level.level === current,
+    action: () => {
+      remember(chatId, level.level);
       paintEffort(button, model, chatId);
-      onChange?.(level);
-    }
+      onChange?.(level.level);
+    },
+  }));
 
-    panel.append(stops, slider, description, note);
-    const position = levels.findIndex((item) => item.level === current);
-    description.textContent = `${levels[position].label} — ${levels[position].description}`;
-    slider.setAttribute("aria-valuetext", `${current} — ${levels[position].description}`);
-    stops.children[position]?.classList.add("on");
-  });
+  const approximated = levels.some((level) => level.approximated);
+  if (approximated || data.note) {
+    items.push({ note: data.note || "Effort is approximated via prompt for this model" });
+  }
+
+  openMenu(button, items);
 }
 
 function capitalize(value) {
