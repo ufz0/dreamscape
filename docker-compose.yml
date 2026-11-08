@@ -8,8 +8,14 @@ services:
     image: dreamscape
     container_name: dreamscape
     restart: unless-stopped
+    # Published on all interfaces by default (the app binds 0.0.0.0 inside the container).
+    # For a machine-only instance: BIND_ADDR=127.0.0.1 docker compose up. Past a trusted network,
+    # put it behind an HTTPS reverse proxy so the session cookie can be marked Secure.
     ports:
-      - "127.0.0.1:8000:8000"
+      - "${BIND_ADDR:-0.0.0.0}:${PORT:-8000}:8000"
+    # A chat turn is a background task: SIGTERM lets running turns finish up to 60 s, and this gives
+    # the process a little more than that before it is killed.
+    stop_grace_period: 90s
     environment:
       DATA_DIR: /app/data
     volumes:

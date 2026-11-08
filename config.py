@@ -37,8 +37,18 @@ def env_int(name: str, default: int) -> int:
 BASE_URL = env("STRATA_BASE_URL", "http://10.0.0.57:8080/v1").rstrip("/")
 API_KEY = env("STRATA_API_KEY", "")
 MODEL = env("STRATA_MODEL", "qwen3.8-flash-next")
-HOST = env("HOST", "127.0.0.1")
+HOST = env("HOST", "0.0.0.0")          # 0.0.0.0 by default: the app is meant to be reachable from the network
 PORT = env_int("PORT", 8000)
+
+
+def cookie_secure_mode() -> str:
+    """auto (default), true or false. auto marks the cookie Secure when the request is https."""
+    return env("COOKIE_SECURE", "auto").strip().lower()
+
+
+def trusted_proxies() -> list[str]:
+    """Addresses or CIDRs whose X-Forwarded-For / X-Forwarded-Proto is believed. Empty by default."""
+    return [part.strip() for part in env("TRUSTED_PROXIES", "").split(",") if part.strip()]
 
 data_path = Path(env("DATA_DIR", "data"))
 DATA_DIR = data_path if data_path.is_absolute() else BASE_DIR / data_path

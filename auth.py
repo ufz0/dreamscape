@@ -3,10 +3,17 @@
 A request resolves the session cookie to a user. That user becomes the current user for the whole
 call, so store/wiki/dreamlog/graph work inside its folder and can not reach another user's data.
 
-Cookies: HttpOnly, SameSite=Lax, path /. Secure is set when the request came in over https, which
-behind a reverse proxy is read from X-Forwarded-Proto. The CSRF token is a random value in a
+Cookies: HttpOnly, SameSite=Lax, path /. Secure follows COOKIE_SECURE: `true` always, `false` never,
+`auto` (the default) when the request arrived over https. Behind a proxy that means X-Forwarded-Proto,
+and only when the connection comes from an address in TRUSTED_PROXIES: an untrusted client can put
+anything in those headers, so they are not believed by default. The CSRF token is a random value in a
 separate cookie, and a state-changing request must send it back as X-CSRF-Token.
+
+Plain HTTP on a LAN still works with `auto`: a login over http gets a cookie without Secure, so the
+browser sends it back. That is the case the README warns about - past a trusted network, put it behind
+an HTTPS reverse proxy.
 """
+import ipaddress
 import secrets
 from urllib.parse import quote
 
@@ -15,6 +22,7 @@ from fastapi.responses import JSONResponse, RedirectResponse
 
 import accounts
 import appdata
+import config
 import db
 
 SESSION_COOKIE = "session"
@@ -22,11 +30,68 @@ CSRF_COOKIE = "csrf"
 SAFE_METHODS = ("GET", "HEAD", "OPTIONS")
 # These still work while a temporary password has not been changed yet.
 ALLOWED_WHILE_UNCHANGED = ("/api/me", "/api/auth/change-password", "/api/auth/logout")
+# The routes that work without a session, and nothing else. Listed so the test can say so too.
+PUBLIC_ROUTES = ("/healthz", "/login", "/setup", "/register")
+
+
+def trusted(request: Request) -> bool:
+    """Whether X-Forwarded-For / X-Forwarded-Proto may be believed for this request."""
+    if not config.trusted_proxies():
+        return False
+    peer = request.client.host if request.client else ""
+    if not peer:
+        return False
+    for entry in config.trusted_proxies():
+        try:
+            if "/" in entry:
+                if ipaddress.ip_address(peer) in ipaddress.ip_network(entry, strict=False):
+                    return True
+            elif ipaddress.ip_address(peer) == ipaddress.ip_address(entry):
+                return True
+        except ValueError:
+            continue   # not an address or a network as written
+    return False
+
+
+def forwarded(request: Request, header: str) -> str:
+    """The first value of a forwarded header, only when the proxy that sent it is trusted."""
+    if not trusted(request):
+        return ""
+    return (request.headers.get(header) or "").split(",")[0].strip()
+
+
+def client_ip(request: Request) -> str:
+    """The address login rate limiting and the logs use: the real client when a trusted proxy named it."""
+    return forwarded(request, "x-forwarded-for") or (request.client.host if request.client else "")
 
 
 def is_https(request: Request) -> bool:
-    forwarded = (request.headers.get("x-forwarded-proto") or "").split(",")[0].strip()
-    return forwarded == "https" or request.url.scheme == "https"
+    mode = config.cookie_secure_mode()
+    if mode == "true":
+        return True
+    if mode == "false":
+        return False
+    return bool(forwarded(request, "x-forwarded-proto")) or request.url.scheme == "https"
+
+
+def is_loopback(value: str) -> bool:
+    try:
+        return ipaddress.ip_address(value).is_loopback
+    except ValueError:
+        return value in ("localhost", "::1")
+
+
+def startup_warning() -> str | None:
+    """The one line the app prints at startup when it is reachable from the network over plain HTTP."""
+    host = config.env("HOST", "0.0.0.0")
+    port = config.env_int("PORT", 8000)
+    if is_loopback(host):
+        return None
+    if config.cookie_secure_mode() == "true":
+        return None
+    return (f"bound to {host}:{port} over plain HTTP. The session cookie is only marked "
+            "Secure when the request arrives over https, so put the app behind an HTTPS reverse proxy "
+            "for anything beyond a trusted network, or set COOKIE_SECURE=true and TRUSTED_PROXIES.")
 
 
 def cookie_options(request: Request) -> dict:
