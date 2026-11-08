@@ -19,6 +19,7 @@ from argon2.exceptions import InvalidHashError, VerificationError, VerifyMismatc
 
 import db
 import limits
+import settings as app_settings
 
 USERNAME_RE = re.compile(r"^[a-z0-9._-]{3,32}$")
 MIN_PASSWORD_LENGTH = 8
@@ -83,8 +84,12 @@ def get_by_username(conn, username: str) -> dict | None:
 
 
 def list_users(conn) -> list[dict]:
+    """The users, each with the limit that actually applies per window and where it comes from."""
     rows = conn.execute("SELECT * FROM users ORDER BY username").fetchall()
-    return [public(row) for row in rows]
+    users = [public(row) for row in rows]
+    for user in users:
+        user["effective"] = {window: limits.resolve(conn, user, window) for window in ("daily", "weekly")}
+    return users
 
 
 def count_admins(conn) -> int:
@@ -105,7 +110,7 @@ def create_user(conn, username: str, password: str, role: str = "user", must_cha
         "INSERT INTO users (username, password_hash, role, status, must_change_password, created, "
         "daily_limit, weekly_limit) VALUES (?, ?, ?, 'active', ?, ?, ?, ?)",
         (name, hash_password(password), role, 1 if must_change else 0, db.now(),
-         max(0, int(daily_limit or 0)), max(0, int(weekly_limit or 0))),
+         limits.parse_limit(daily_limit), limits.parse_limit(weekly_limit)),
     )
     db.audit(conn, actor, "create", name, f"role={role}")
     user = get_by_username(conn, name)
@@ -284,14 +289,14 @@ def lockout(conn, username: str, ip: str) -> dict | None:
 # ---------- admin settings ----------
 
 def settings(conn) -> dict:
-    return {key: db.setting(conn, key) == "on" for key in db.DEFAULT_SETTINGS}
+    """The boolean flags, through the settings table. Values live in settings.py."""
+    return app_settings.flags(conn)
 
 
 def set_setting(conn, actor: dict, key: str, value: bool) -> dict:
-    if key not in db.DEFAULT_SETTINGS:
+    if key not in app_settings.FLAGS:
         raise ValueError(f"Unknown setting: {key}")
-    db.set_setting(conn, key, "on" if value else "off")
-    db.audit(conn, actor["username"], "setting", key, "on" if value else "off")
+    app_settings.set_value(conn, actor, key, bool(value))
     return settings(conn)
 
 

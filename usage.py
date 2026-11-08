@@ -44,7 +44,7 @@ def estimate(messages: list[dict], completion_text: str) -> dict:
 
 
 def record(conn, user_id, usage: dict, source: str, model: str, conversation_id: str | None = None,
-           estimated: bool = False, at: datetime | None = None) -> None:
+           estimated: bool = False, at: datetime | None = None, connection_id: int | None = None) -> None:
     """One row for one upstream call. `at` is for the seed script and the tests; normally now."""
     prompt = token_field(usage, "prompt_tokens", "input_tokens")
     completion = token_field(usage, "completion_tokens", "output_tokens")
@@ -54,9 +54,9 @@ def record(conn, user_id, usage: dict, source: str, model: str, conversation_id:
     moment = (at or datetime.now(timezone.utc)).astimezone(timezone.utc)
     conn.execute(
         "INSERT INTO usage_events (user_id, timestamp, prompt_tokens, completion_tokens, total_tokens, "
-        "model, source, conversation_id, estimated) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "model, source, conversation_id, estimated, connection_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (user_id, moment.isoformat(timespec="seconds"), prompt, completion, total, model or "", source,
-         conversation_id, 1 if estimated else 0),
+         conversation_id, 1 if estimated else 0, connection_id),
     )
 
 
@@ -169,8 +169,11 @@ def aggregate(conn, period: str, target: date | None = None, user_id: int | None
                                    (entry["user_id"],)).fetchone()
             if user_row is None:
                 continue
-            limit = int(user_row[f"{window}_limit"] or 0)
-            entry["current"][window] = {"limit": limit,
+            fake = {"id": entry["user_id"], f"{window}_limit": int(user_row[f"{window}_limit"] or 0)}
+            resolved = limits.resolve(conn, fake, window)
+            entry["current"][window] = {"limit": resolved["limit"],
+                                        "own": resolved["own"],
+                                        "source": resolved["source"],
                                         "used": limits.window_tokens(conn, entry["user_id"], window)}
 
     chart = sorted(buckets.values(), key=lambda bucket: bucket["label"])
