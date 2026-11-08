@@ -3,6 +3,10 @@ uvicorn>=0.30
 httpx>=0.27
 argon2-cffi>=25.1
 
+# Encrypts the secrets kept in the database (connection API keys). The key comes from
+# APP_SECRET_KEY, or from data/secret.key generated on first start.
+cryptography>=42
+
 # Web search. `ddgs` is the current name of the package (duckduckgo-search was renamed to it);
 # it is only imported when the duckduckgo provider is used.
 ddgs>=9.16.1,<10
