@@ -8,6 +8,7 @@ import { loadMe, account, mustChange, initial, readUsage, usageBlock, openChange
 export const settings = load();
 
 let models = [];
+let groups = [];
 let defaultModel = "";
 let activeChat = null;
 let hooks = {};
@@ -17,6 +18,16 @@ let ui = {};
 
 export function currentModel() {
   return settings.model || defaultModel || "model";
+}
+
+// The name a model is shown by. The id is what the server needs; a display name set by an admin is
+// what a person reads, and the connection it belongs to is what tells two same-named models apart.
+export function displayName(namespaced) {
+  for (const group of groups) {
+    const model = group.models.find((entry) => entry.namespaced === namespaced);
+    if (model) return model.display_name;
+  }
+  return namespaced;
 }
 
 export function paintIcons() {
@@ -30,11 +41,23 @@ export async function loadModels() {
   try {
     const data = await api("/api/models");
     models = data.models;
+    groups = data.groups;
     defaultModel = data.default;
   } catch (error) {
     toast(`Cannot reach the model server: ${error.message}`);
   }
   return models;
+}
+
+export async function modelGroups() {
+  await loadModels();
+  return groups;
+}
+
+export function chooseModel(namespaced) {
+  settings.model = namespaced;
+  save(settings);
+  if (hooks.onModelChange) hooks.onModelChange(namespaced);
 }
 
 export async function startShell(options) {
@@ -122,10 +145,65 @@ async function openUserMenu(anchor) {
 
 export function setActiveChat(id) {
   activeChat = id;
+  if (!ui.list) return;
   for (const item of ui.list.querySelectorAll("li")) item.classList.toggle("active", item.dataset.id === id);
+
+  // Opening a chat is what clears its dot: the same request that showed the conversation marks it
+  // read on the server, so a dot still standing after this is one the user has already seen.
+  const state = ui.list.querySelector(`[data-state="${cssEscape(id)}"]`);
+  if (state) state.classList.remove("unread");
+  setTabDot(Boolean(ui.list.querySelector(".row-state.unread")));
 }
 
 // ---------- chat list ----------
+
+// What a chat row says about a run: the spinner while it is generating, the dot for a result that
+// has arrived since the chat was last read. Opening the chat is what clears the dot, so a chat you
+// are looking at does not get one.
+function rowState(row) {
+  const state = document.createElement("span");
+  state.className = "row-state";
+  state.dataset.state = row.id;
+  if (row.active_run_id) {
+    state.innerHTML = icon("spinner", 14);
+    state.title = "Generating";
+    state.setAttribute("aria-label", "Generating");
+  } else if (row.unread && row.id !== activeChat) {
+    state.classList.add("unread");
+    state.title = "A result arrived since you last read this chat";
+  }
+  return state;
+}
+
+// A run ending is what turns the spinner into the dot. This is the in-place version of a list read;
+// it returns false when there is no row for this chat yet — a chat that has just been created —
+// which is when the caller has to read the list instead.
+export function markRun(id, status) {
+  if (!ui.list) return false;
+  const state = ui.list.querySelector(`[data-state="${cssEscape(id)}"]`);
+  if (!state) return false;
+
+  state.classList.remove("unread");
+  state.title = "";
+  state.innerHTML = "";
+  if (["queued", "running"].includes(status)) {
+    state.innerHTML = icon("spinner", 14);
+    state.title = "Generating";
+  } else if (id !== activeChat) {
+    state.classList.add("unread");
+    state.title = "A result arrived since you last read this chat";
+  }
+  return true;
+}
+
+// The tab title carries the same dot, for when the page is in another window.
+export function setTabDot(on) {
+  document.title = on ? `• dreamscape` : "dreamscape";
+}
+
+function cssEscape(value) {
+  return window.CSS && CSS.escape ? CSS.escape(String(value)) : String(value).replace(/[^a-zA-Z0-9_-]/g, "");
+}
 
 function dayGroup(value) {
   const date = new Date(value);
@@ -201,9 +279,11 @@ export async function renderList() {
       { label: "Delete", danger: true, action: () => deleteChat(row.id) },
     ]));
 
-    item.append(link, menu);
+    item.append(link, rowState(row), menu);
     ui.list.append(item);
   }
+
+  setTabDot(rows.some((row) => row.unread && row.id !== activeChat));
 }
 
 async function renameChat(id, current) {
@@ -359,17 +439,30 @@ function segmented(options, value, onChange) {
   return group;
 }
 
+// The models a user may use, grouped by the connection they are on. A same-named model on two
+// engines is two different models, so the group is part of what has to be readable here.
 function modelSelect(onChange) {
   const select = document.createElement("select");
-  for (const model of models) {
-    const option = document.createElement("option");
-    option.value = model;
-    option.textContent = model;
-    option.selected = model === currentModel();
-    select.append(option);
-  }
+
+  const fill = () => {
+    select.innerHTML = "";
+    for (const group of groups) {
+      const block = document.createElement("optgroup");
+      block.label = group.connection.name;
+      for (const model of group.models) {
+        const option = document.createElement("option");
+        option.value = model.namespaced;
+        option.textContent = model.display_name;
+        option.selected = model.namespaced === currentModel();
+        block.append(option);
+      }
+      select.append(block);
+    }
+  };
+
+  fill();
   select.addEventListener("change", () => onChange(select.value));
-  if (!models.length) loadModels().then(() => renderList());
+  if (!groups.length) loadModels().then(fill);
   return select;
 }
 

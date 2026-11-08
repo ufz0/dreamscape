@@ -40,6 +40,14 @@ export function usageBlock(usage, options = {}) {
   return block;
 }
 
+// Where a limit that is shown comes from. The same words the app uses when a limit is reached, so
+// a person reads this one way in both places.
+const SOURCE_TEXT = {
+  own: "your own limit",
+  global: "the global default",
+  unlimited: "you set this to unlimited",
+};
+
 // Today / this week with a thin bar. Amber at 80%, red at 100%, "no limit" when there is none.
 function fillUsage(block, usage, options) {
   block.innerHTML = "";
@@ -54,7 +62,8 @@ function fillUsage(block, usage, options) {
 
     const value = document.createElement("span");
     value.className = "value";
-    value.title = `${window.used} tokens used${window.limit ? ` of ${window.limit}` : ""}`;
+    const source = SOURCE_TEXT[window.source] || "";
+    value.title = `${window.used} tokens used${window.limit ? ` of ${window.limit}` : ""}${source ? `, ${source}` : ""}`;
     const estimate = window.estimated ? " ~" : "";
     value.textContent = `${formatK(window.used)}${estimate} / ${window.limit ? formatK(window.limit) : "no limit"}`;
 
@@ -70,6 +79,14 @@ function fillUsage(block, usage, options) {
       else if (window.percent >= 80) fill.classList.add("high");
       bar.append(fill);
       row.append(bar);
+    }
+
+    // The number on the bar is the one that applies, so say whose it is.
+    if (window.limit && source) {
+      const mark = document.createElement("span");
+      mark.className = "source";
+      mark.textContent = source;
+      row.append(mark);
     }
 
     if (options.showReset && window.limit) {

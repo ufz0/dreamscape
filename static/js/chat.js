@@ -3,6 +3,7 @@ import { escapeHtml } from "./api.js";
 import { renderMarkdown } from "./markdown.js";
 import { icon } from "./icons.js";
 import { canShowNote, noteText } from "./notes.js";
+import { TERMINAL } from "./runs.js";
 
 // Which messages the user expanded in this session.
 const expanded = new Map();
@@ -240,6 +241,18 @@ function button(label, name, action) {
   return node;
 }
 
+// A run that did not reach the end of its turn. The words the server gives are used when it has
+// any; this is the reading for a turn that was stopped without a reason attached to it.
+const STOPPED = {
+  cancelled: "Stopped. The answer is what was written up to here.",
+  interrupted: "Interrupted. The answer is what was written up to here.",
+  failed: "The run did not finish.",
+};
+
+export function stopNote(status, error) {
+  return error || STOPPED[status] || "";
+}
+
 export class ChatView {
   constructor(container, settings, options = {}) {
     this.container = container;
@@ -249,6 +262,16 @@ export class ChatView {
     this.onLimit = options.onLimit;
     this.jumpButton = options.jumpButton;
     this.stickToBottom = true;
+
+    // What this view has already shown for a run, so a replay does not show it a second time.
+    this.shownRuns = new Set();
+    this.queueLine = null;
+    this.closed = false;
+    // A turn read from the transcript is not live: a step is only closed when the events say so.
+    this.open = false;
+    // How a turn that stopped early is described. The run's status is what fills this; the fall-back
+    // reading is in STOPPED.
+    this.stoppedNote = "";
 
     container.addEventListener("click", (event) => {
       const copy = event.target.closest(".copy[data-copy]");
@@ -272,6 +295,17 @@ export class ChatView {
 
   clear() {
     this.container.innerHTML = "";
+    this.shownRuns.clear();
+    this.queueLine = null;
+    this.closed = false;
+    this.open = false;
+    this.stoppedNote = "";
+    this.current = null;
+    this.textBlock = null;
+    this.thinking = null;
+    this.rows = new Map();
+    this.sources = [];
+    this.raw = "";
   }
 
   // ---------- history ----------
@@ -339,9 +373,12 @@ export class ChatView {
 
       if (canShowNote(record)) message.append(note(noteText(record)));
       if (record.stopped) message.append(note("Stopped before the answer was complete."));
+      // A partial record is a run that stopped early. It is not the model's fault, and the answer
+      // is not missing: it is just shorter than the turn would have been.
+      if (record.partial) message.append(note(this.stoppedNote || STOPPED.interrupted));
       const chips = sourcesRow(sources);
       if (chips) message.append(chips);
-      if (record.content || record.reasoning) {
+      if (record.content || record.reasoning || record.partial) {
         message.append(actions(record.model || this.model, () => record.content || "", {
           retry: this.onRetry, edit: this.onEdit,
         }));
@@ -379,8 +416,39 @@ export class ChatView {
     this.rows = new Map();
     this.sources = [];
     this.raw = "";
+    this.closed = false;
+    this.queueLine = null;
     this.container.append(message);
     return message;
+  }
+
+  // A turn that is still generating and whose events cannot all be replayed: the transcript holds
+  // what the run has written so far, so it is read through the same path the stream uses. That
+  // keeps one message for the turn, and what comes next continues in the same place.
+  replayRun(records) {
+    this.open = true;
+    for (const record of records) {
+      if (record.role === "user") {
+        this.handle({ type: "user_message", content: record.content || "", run: record.run });
+        continue;
+      }
+      if (record.role === "tool") {
+        let result = record.content;
+        try { result = JSON.parse(record.content); } catch (error) { /* kept as text */ }
+        this.handle({ type: "tool", id: record.tool_call_id, name: record.name,
+                      arguments: record.arguments, result });
+        continue;
+      }
+      this.handle({ type: "assistant_message", content: record.content || "",
+                    reasoning: record.reasoning || "", reasoning_ms: record.reasoning_ms || 0,
+                    note: record.note, tool_calls: record.tool_calls || [] });
+    }
+    this.open = false;
+  }
+
+  // A turn this view has already shown: the user message is not repeated when the run reports it.
+  markShown(runId) {
+    this.shownRuns.add(runId);
   }
 
   removeLastMessage() {
@@ -392,7 +460,37 @@ export class ChatView {
   // ---------- streaming ----------
 
   handle(event) {
+    // A run is a thing on the server, so its own events come through here too: what the user
+    // asked, where the turn is in the connection's queue, and how the turn ended.
+    if (event.type === "user_message") {
+      if (this.shownRuns.has(event.run)) return;
+      this.shownRuns.add(event.run);
+      this.addUser(event.content || "", { showActions: true });
+      if (!this.current) this.assistantMessage();   // the answer to this message follows it
+      return;
+    }
+
+    if (event.type === "queued") {
+      const line = this.queueLine || this.ensureQueueLine();
+      line.textContent = event.position
+        ? `Waiting in queue (position ${event.position}). The request starts when a slot frees.`
+        : "Starting the request.";
+      if (this.stickToBottom) this.scrollToBottom();
+      return;
+    }
+
+    if (event.type === "run_status") {
+      // The end of the run. A turn that stopped before its last answer says so, with the reason
+      // the run gave when it has one.
+      if (TERMINAL.includes(event.status)) {
+        const stopped = ["failed", "cancelled", "interrupted"].includes(event.status);
+        this.finishCurrent(stopped ? stopNote(event.status, event.error) : "");
+      }
+      return;
+    }
+
     if (event.type === "reasoning") {
+      this.clearQueue();
       if (!this.thinking) {
         this.thinking = thinkingBlock(this.settings, "Thinking…");
         this.thinking.line.classList.add("live");
@@ -411,6 +509,7 @@ export class ChatView {
     }
 
     if (event.type === "delta") {
+      this.clearQueue();
       this.raw += event.content;
       const block = this.textBlock || this.ensureTextBlock();
       block.innerHTML = renderMarkdown(this.raw);
@@ -422,6 +521,7 @@ export class ChatView {
     }
 
     if (event.type === "tool") {
+      this.clearQueue();
       let row = this.rows.get(event.id);
       if (!row) {
         row = toolRow(event.name, event.arguments, event.result, false);
@@ -452,7 +552,19 @@ export class ChatView {
         this.textBlock = null;
         this.raw = "";
       }
-      if (event.reasoning && this.thinking) {
+      // A turn read from the transcript arrives as one block, not as it streamed. When nothing was
+      // streamed for this step, the block is what to show; when it was, the text is already there.
+      if (event.content && !this.raw) {
+        const block = this.textBlock || this.ensureTextBlock();
+        this.raw = event.content;
+        block.innerHTML = renderMarkdown(this.raw);
+      }
+      if (event.reasoning) {
+        if (!this.thinking) {
+          this.thinking = thinkingBlock(this.settings, "");
+          this.thinking.body.textContent = event.reasoning;
+          this.current.prepend(this.thinking.block);
+        }
         this.thinking.line.classList.remove("live");
         const seconds = event.reasoning_ms ? Math.round(event.reasoning_ms / 1000) : null;
         this.thinking.label().textContent = seconds ? `Thought for ${seconds}s` : "Thought process";
@@ -466,19 +578,7 @@ export class ChatView {
       // instead, and a tool that is still running keeps the note off until the answer comes.
       const runningTool = [...this.rows.values()].some((row) => row.classList.contains("running"));
       if (canShowNote(event, { runningTool })) this.current.append(note(noteText(event)));
-      if (!event.tool_calls?.length) {
-        const block = this.textBlock || this.ensureTextBlock();
-        if (this.raw) block.innerHTML = renderMarkdown(this.raw);
-        for (const caret of this.current.querySelectorAll(".caret")) caret.remove();
-        const chips = sourcesRow(this.sources);
-        if (chips) this.current.append(chips);
-        this.current.classList.remove("current");
-        for (const node of this.container.querySelectorAll(".msg.last")) node.classList.remove("last");
-        this.current.classList.add("last");
-        this.current.append(actions(this.model, () => this.raw, { retry: this.onRetry, edit: this.onEdit }));
-        this.textBlock = null;
-        this.raw = "";
-      }
+      if (!event.tool_calls?.length && !this.open) this.finishCurrent();
       return;
     }
 
@@ -495,6 +595,15 @@ export class ChatView {
     }
   }
 
+  // A line the view itself has to say, for a turn that cannot be shown as a message.
+  showNote(text) {
+    const message = document.createElement("p");
+    message.className = "note";
+    message.textContent = text;
+    this.container.append(message);
+    if (this.stickToBottom) this.scrollToBottom();
+  }
+
   // A token limit is a plain notice, not an error code: what happened, which limit, when it resets.
   showLimit(info) {
     if (!info) return;
@@ -504,6 +613,41 @@ export class ChatView {
     this.container.append(message);
     if (this.stickToBottom) this.scrollToBottom();
     if (this.onLimit) this.onLimit(info);
+  }
+
+  // The turn is over: what was written stays, the caret goes away, and the actions appear.
+  // Called by the last answer of a turn and by the run's end, so it is safe to call twice.
+  finishCurrent(line) {
+    if (!this.current || this.closed) return;
+    const block = this.textBlock || this.ensureTextBlock();
+    if (this.raw) block.innerHTML = renderMarkdown(this.raw);
+    for (const caret of this.current.querySelectorAll(".caret")) caret.remove();
+    const chips = sourcesRow(this.sources);
+    if (chips) this.current.append(chips);
+    if (line) this.current.append(note(line));
+    this.current.classList.remove("current");
+    for (const node of this.container.querySelectorAll(".msg.last")) node.classList.remove("last");
+    this.current.classList.add("last");
+    this.current.append(actions(this.model, () => this.raw, { retry: this.onRetry, edit: this.onEdit }));
+    this.textBlock = null;
+    this.closed = true;
+  }
+
+  ensureQueueLine() {
+    if (!this.queueLine) {
+      const line = document.createElement("p");
+      line.className = "note queue";
+      this.current.append(line);
+      this.queueLine = line;
+    }
+    return this.queueLine;
+  }
+
+  // The request has started, so the waiting line is no longer true.
+  clearQueue() {
+    if (!this.queueLine) return;
+    this.queueLine.remove();
+    this.queueLine = null;
   }
 
   ensureTextBlock() {

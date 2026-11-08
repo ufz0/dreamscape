@@ -332,6 +332,12 @@ input, textarea, select { font: inherit; color: inherit; }
 .side-list li:hover .row-menu, .row-menu.open { display: inline-flex; }
 .row-menu:hover { color: var(--text); }
 
+/* What a chat row says about a run: the spinner while it is generating, the dot for a result that
+   has arrived since the chat was last read. Both are state, so neither carries words. */
+.row-state { flex: none; display: inline-flex; align-items: center; justify-content: center; min-width: 16px; color: var(--muted); }
+.row-state svg { width: 14px; height: 14px; animation: spin 1.2s linear infinite; transform-origin: 50% 50%; }
+.row-state.unread { width: 8px; height: 8px; border-radius: 50%; background: var(--accent); }
+
 .side-foot { display: flex; align-items: center; gap: 8px; padding: 10px 8px 4px; border-top: 1px solid var(--border); }
 .avatar {
   width: 26px; height: 26px; border-radius: 50%;
@@ -467,6 +473,10 @@ pre.code code { display: block; padding: 12px; font-family: var(--mono); font-si
 .thinking.open .body { display: block; }
 .note { font-size: 13px; color: var(--muted); font-style: italic; }
 
+/* Waiting for a slot on a connection is a state, not an explanation, so it is not italic and it
+   uses the warning tone the usage bars already use for a limit being close. */
+.note.queue { font-style: normal; color: var(--warn); }
+
 /* The pages a turn used, as small chips under the answer. No favicons: domain and title only. */
 .sources { display: flex; flex-wrap: wrap; gap: 6px; margin: 10px 0 2px; }
 .sources .chip {
@@ -599,6 +609,9 @@ pre.code code { display: block; padding: 12px; font-family: var(--mono); font-si
 .menu .tick { width: 16px; flex: none; color: var(--accent); }
 .menu .item-text { flex: 1; }
 .menu .item-desc { display: block; font-size: 12.5px; color: var(--muted); margin-top: 2px; }
+/* A name for where the items below came from. It is not a choice and not an explanation, so it is
+   plain text, not italic, and the machine name is in the mono face the rest of the app uses for ids. */
+.menu .menu-group { padding: 8px 10px 3px; font-size: 12px; color: var(--muted); }
 .menu .menu-note { padding: 6px 10px; font-size: 12px; color: var(--muted); font-style: italic; }
 .menu hr { border: 0; border-top: 1px solid var(--border); margin: 4px 6px; }
 
@@ -801,6 +814,9 @@ textarea.editor { width: 100%; min-height: 320px; font-family: var(--mono); font
 .usage-bar .fill { display: block; height: 100%; border-radius: 3px; background: var(--accent); }
 .usage-bar .fill.high { background: var(--warn); }
 .usage-bar .fill.over { background: var(--danger); }
+
+/* The number on a bar is the limit that applies, which is not always the one on this account. */
+.usage-row .source { flex: 1; min-width: 0; font-size: 12px; color: var(--muted); text-align: right; }
 
 /* A reached token limit is stated as a fact, not as an error code. */
 .note.limit {

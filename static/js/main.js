@@ -1,10 +1,11 @@
 // Chat page: top bar, thread, composer, send flow. The sidebar and settings come from shell.js.
-import { api, streamChat, download } from "./api.js";
+import { api, download } from "./api.js";
 import { icon } from "./icons.js";
 import { openMenu, openPanel, toast } from "./ui.js";
-import { ChatView } from "./chat.js";
+import { ChatView, stopNote } from "./chat.js";
+import { follow as followRun, send as sendRun, stop as stopRun, TERMINAL } from "./runs.js";
 import { settings, startShell, renderList, setActiveChat, currentModel, loadModels, greeting,
-  controlRow, numberInput, textArea, checkbox } from "./shell.js";
+  controlRow, numberInput, textArea, checkbox, modelGroups, displayName, markRun, setTabDot } from "./shell.js";
 import { save } from "./settings.js";
 import { effortFor, openEffort, paintEffort, remember, clearPending } from "./effort.js";
 import { providerStatus, webToolsFor, rememberWeb, clearPending as clearWebPending } from "./webtools.js";
@@ -20,7 +21,8 @@ const ui = {
 
 let chatId = null;
 let generating = false;
-let controller = null;
+let activeRun = null;   // the run this page is watching. Watching it is not what keeps it going.
+let stream = null;      // this page's connection to the run; closing it does not stop the run
 let limitUntil = null;   // when a reached token limit resets; sending stays off until then
 
 const view = new ChatView(ui.thread, settings, {
@@ -72,6 +74,8 @@ function showConversation(hasMessages) {
 
 function newChat() {
   chatId = null;
+  activeRun = null;
+  stream?.abort();          // this page stops watching; the run is not stopped by that
   clearPending();
   clearWebPending();
   setActiveChat(null);
@@ -80,6 +84,7 @@ function newChat() {
   showConversation(false);
   history.replaceState(null, "", "/");
   paintEffort(ui.effort, currentModel(), null);
+  refreshSendButton();
   ui.input.focus();
 }
 
@@ -88,12 +93,93 @@ async function openChat(id) {
   chatId = id;
   setActiveChat(id);
   view.model = data.conversation.model || currentModel();
-  const hasMessages = data.messages.some((record) => record.role === "user");
   ui.title.textContent = data.conversation.title || "New chat";
-  if (hasMessages) view.render(data.messages); else view.clear();
+
+  const records = data.messages;
+  const hasMessages = records.some((record) => record.role === "user");
+  const run = data.active_run;
+
+  if (run) {
+    // A turn is still being written here. The transcript is the record for what is finished, and
+    // the run's own turn comes from its events, so nothing is shown twice.
+    const own = records.filter((record) => record.run === run.id);
+    view.render(records.filter((record) => record.run !== run.id));
+
+    let after = 0;
+    if (!run.buffered) {
+      // Not in the process that is serving this request: there is no event stream for it.
+      view.render(records);
+      view.showNote("This turn is still generating on the server. The transcript shows what has been written so far.");
+      setGenerating(true);
+    } else if (run.first_event > 1) {
+      // The buffer is bounded, so the beginning of this turn is only in the transcript.
+      view.replayRun(own);
+      after = run.last_event;
+      watch(run, after);
+    } else {
+      watch(run, 0);
+    }
+  } else {
+    // A partial answer in the transcript is a run that stopped early, so the wording comes from the
+    // run's own status when it is known. A turn that ended without writing anything has no record,
+    // and the run row is the only thing that says why.
+    const last = data.last_run;
+    view.stoppedNote = last ? stopNote(last.status, last.error) : "";
+    view.render(records);
+    setGenerating(false);
+    if (last && ["failed", "cancelled", "interrupted"].includes(last.status)
+        && !records.some((record) => record.run === last.id)) {
+      view.showNote(stopNote(last.status, last.error));
+    }
+  }
+
   showConversation(hasMessages);
+  // A model an admin removed is not a routing failure: the chat is fine, the choice is not.
+  if (data.model_unavailable) view.showNote("The model this chat used is not on any connection any more. Choose another one before sending.");
   paintEffort(ui.effort, currentModel(), chatId);
   history.replaceState(null, "", `?c=${encodeURIComponent(id)}`);
+}
+
+// ---------- following a run ----------
+
+async function watch(run, after) {
+  activeRun = run;
+  stream = new AbortController();
+  setGenerating(true);
+
+  let result;
+  try {
+    result = await followRun(run.id, after, (event) => {
+      view.handle(event);
+      if (event.type === "title") applyTitle(event.title);
+      if (event.type === "run_status" && TERMINAL.includes(event.status)) endRun(event.status);
+    }, stream.signal);
+  } catch (error) {
+    if (error.name !== "AbortError") toast(`Cannot follow this run: ${error.message}`);
+    return;
+  }
+
+  if (result.stopped) return;
+  if (!result.replayable) {
+    // Nothing left to stream. The transcript is the record, so read the conversation again.
+    await openChat(run.conversation_id);
+  }
+}
+
+// A run that stopped without producing its last answer says so in the thread; the sidebar row
+// keeps a dot until the chat is opened, which is what tells the user a result arrived.
+async function endRun(status) {
+  generating = false;
+  activeRun = null;
+  stream = null;
+  setGenerating(false);
+  if (!markRun(chatId, status)) await renderList();
+}
+
+function applyTitle(title) {
+  if (!title) return;
+  ui.title.textContent = title;
+  renderList();
 }
 
 // ---------- top bar ----------
@@ -233,58 +319,48 @@ async function send(text, regenerate = false) {
   remember(chatId, level);
   rememberWeb(chatId, web);
 
-  if (regenerate) view.removeLastMessage();
-  else view.addUser(text, { showActions: true });
+  // Sending answers as soon as the run exists; the turn is the run, not this request.
+  let started;
+  try {
+    started = await sendRun(chatId, {
+      message: text, model: currentModel(), system: settings.system,
+      temperature: settings.temperature, wiki_index: settings.wikiIndex, regenerate,
+      reasoning_effort: level, web_search: web, generate_titles: settings.generateTitles,
+    });
+  } catch (error) {
+    // A limit and a chat that is still generating are both things the thread should say, not a toast.
+    if (error.status === 429) {
+      view.showLimit(error.body);
+    } else if (error.status === 409) {
+      const detail = error.body?.detail || error.message;
+      if (activeRun && activeRun.id === error.body?.run_id) { view.showNote(detail); return; }
+      await openChat(chatId);
+      view.showNote(detail);
+    } else {
+      toast(`Request failed: ${error.message}`);
+    }
+    return;
+  }
 
+  // The thread shows what the run reports, so the same turn is never shown twice: the message the
+  // user typed comes from the run's own event unless it is already on screen.
+  if (regenerate) {
+    view.removeLastMessage();
+    view.markShown(started.run.id);
+    view.assistantMessage();
+  }
   ui.input.value = "";
   grow();
-  refreshSendButton();
-
   view.model = currentModel();
-  view.assistantMessage();
   view.stickToBottom = true;
   ui.jump.hidden = true;
   showConversation(true);
+  refreshSendButton();
 
-  controller = new AbortController();
-  setGenerating(true);
+  // The row for a chat that did not exist a moment ago has to be read, not painted in place.
+  if (!markRun(chatId, "running")) await renderList();
 
-  let answered = false;
-
-  try {
-    await streamChat({
-      conversation_id: chatId, message: text, model: currentModel(), system: settings.system,
-      temperature: settings.temperature, wiki_index: settings.wikiIndex, regenerate,
-      reasoning_effort: level, web_search: web,
-    }, (event) => view.handle(event), controller.signal);
-    answered = true;
-  } catch (error) {
-    if (error.status === 429) {
-      view.removeLastMessage();
-      view.showLimit(error.body);
-    } else if (error.name !== "AbortError") {
-      toast(`Request failed: ${error.message}`);
-    }
-  } finally {
-    setGenerating(false);
-    controller = null;
-    // A new chat gets its name from the model after the first reply, when that setting is on.
-    // Only after an answer: a failed or stopped turn has nothing to name, and naming would be a
-    // metered call for nothing. The server keeps a name typed by hand and skips the call when the
-    // limit is reached, so a title is never lost because of this.
-    if (firstTurn && answered && settings.generateTitles && chatId) {
-      // The name is not worth a message about it, so a failure here is not shown.
-      await api(`/api/conversations/${chatId}/title`, {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ model: currentModel() }),
-      }).catch(() => {});
-    }
-    await renderList();
-    const row = (await api("/api/conversations")).conversations.find((r) => r.id === chatId);
-    if (row) ui.title.textContent = row.title;
-    // A regenerated answer replaced the one before it; show the transcript as it now stands.
-    if (regenerate) await openChat(chatId);
-  }
+  await watch(started.run, 0);
 }
 
 async function regenerate() {
@@ -292,16 +368,17 @@ async function regenerate() {
   const data = await api(`/api/conversations/${chatId}/messages`);
   const lastUser = [...data.messages].reverse().find((record) => record.role === "user");
   if (!lastUser) return;
-  await send(lastUser.content || "", { regenerate: true });
+  await send(lastUser.content || "", true);
 }
 
-function stopGeneration() {
-  if (!chatId) return;
-  api("/api/chat/stop", {
-    method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ conversation_id: chatId }),
-  }).catch(() => {});
-  controller?.abort();
+// Stop is the only thing that ends a run. Closing this page's stream does not.
+async function stopGeneration() {
+  if (!activeRun) return;
+  try {
+    await stopRun(activeRun.id);
+  } catch (error) {
+    toast(`Could not stop this run: ${error.message}`);
+  }
 }
 
 // ---------- composer popups ----------
@@ -353,17 +430,26 @@ function webRow(provider) {
 }
 
 ui.modelBtn.addEventListener("click", async () => {
-  const models = await loadModels();
-  if (!models.length) return;
-  openMenu(ui.modelBtn, models.map((model) => ({
-    label: model,
-    checked: model === currentModel(),
-    action: () => { settings.model = model; localStorage.setItem("dreamscape.settings", JSON.stringify(settings)); paintModel(); },
-  })));
+  const groups = await modelGroups();
+  if (!groups.length) return;
+
+  const items = [];
+  for (const group of groups) {
+    items.push({ group: group.connection.name });
+    for (const model of group.models) {
+      items.push({
+        label: model.display_name,
+        description: model.id,
+        checked: model.namespaced === currentModel(),
+        action: () => { chooseModel(model.namespaced); paintModel(); },
+      });
+    }
+  }
+  openMenu(ui.modelBtn, items);
 });
 
 function paintModel() {
-  ui.modelBtn.querySelector(".name").textContent = currentModel();
+  ui.modelBtn.querySelector(".name").textContent = displayName(currentModel());
   paintEffort(ui.effort, currentModel(), chatId);
 }
 

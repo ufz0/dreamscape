@@ -34,6 +34,15 @@ export function openMenu(anchor, items) {
 
   for (const item of items) {
     if (item.separator) { menu.appendChild(document.createElement("hr")); continue; }
+    if (item.group) {
+      // A list that holds things from different sources names the source. It is not a choice, so
+      // it is not focusable, and it is not italic: that styling is for an explanation.
+      const header = document.createElement("p");
+      header.className = "menu-group";
+      header.textContent = item.group;
+      menu.append(header);
+      continue;
+    }
     if (item.note) {
       // A line that explains the list. It is not a choice, so it is not focusable.
       const line = document.createElement("p");

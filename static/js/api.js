@@ -1,4 +1,5 @@
-// Small fetch helpers: JSON API, the SSE chat stream, and a file download.
+// Small fetch helpers: the JSON API and a file download. Runs have their own client in runs.js,
+// because a run is a thing on the server with its own event stream.
 // Every state-changing request sends the CSRF cookie back as a header, which is what the server
 // checks. A 401 from an API call means the session is gone, so the page goes to /login.
 
@@ -30,47 +31,6 @@ export async function api(path, options = {}) {
     throw error;
   }
   return response.json();
-}
-
-export async function streamChat(payload, onEvent, signal) {
-  const response = await fetch("/api/chat", {
-    method: "POST",
-    headers: { "Content-Type": "application/json", "X-CSRF-Token": csrfToken() },
-    body: JSON.stringify(payload),
-    signal,
-  });
-  if (response.status === 401) {
-    window.location.href = `/login?next=${encodeURIComponent(window.location.pathname)}`;
-    const error = new Error("Please log in.");
-    error.status = 401;
-    throw error;
-  }
-  if (!response.ok) {
-    const body = await response.json().catch(() => ({}));
-    const error = new Error(body.detail || body.message || `${response.status} ${response.statusText}`);
-    error.status = response.status;
-    error.body = body;
-    throw error;
-  }
-
-  const reader = response.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = "";
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    let cut = buffer.indexOf("\n\n");
-    while (cut >= 0) {
-      const chunk = buffer.slice(0, cut).trim();
-      buffer = buffer.slice(cut + 2);
-      cut = buffer.indexOf("\n\n");
-      if (chunk.startsWith("data:")) {
-        const payloadText = chunk.slice(5).trim();
-        if (payloadText && payloadText !== "[DONE]") onEvent(JSON.parse(payloadText));
-      }
-    }
-  }
 }
 
 export function escapeHtml(text) {
