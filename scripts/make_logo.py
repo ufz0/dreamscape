@@ -8,7 +8,7 @@ Writes:
   static/logo-mark.svg   icon only, currentColor with the terracotta accent
   static/logo-full.svg   icon + wordmark, the wordmark outlined from static/fonts/ so it renders
                          the same anywhere (SVG text would depend on the font being installed)
-  static/favicon.svg     simplified mark on a solid tile, light and dark inside the SVG
+  static/favicon.svg     the same mark, transparent, light and dark inside the SVG
   static/js/logo.js      the shapes the app draws inline, so the mark follows the theme chosen in
                          Settings
 
@@ -168,14 +168,12 @@ def logo_full(shapes):
 
 
 def favicon(shapes):
-    dark_style = ("<style>@media (prefers-color-scheme: dark) { svg { color: " + INK_DARK +
-                  "; } .tile { fill: " + PAPER_DARK + "; } }</style>")
-    out = [svg_open(24, theme_css=True)]
-    out.append('  <rect class="tile" x="0" y="0" width="24" height="24" rx="6" fill="' +
-               PAPER_LIGHT + '" stroke="none"/>\n')
-    out.append("  " + dark_style + "\n")
-    out.append(f"  {shapes}\n</svg>\n")
-    return "".join(out)
+    """The mark on a transparent background, so it works on a light or a dark browser tab bar.
+
+    A raster cannot switch themes, but an SVG can: the neutral parts of the mark change with
+    prefers-color-scheme, the terracotta accent stays.
+    """
+    return svg_open(24, theme_css=True) + f"  {shapes}\n</svg>\n"
 
 
 def main():
