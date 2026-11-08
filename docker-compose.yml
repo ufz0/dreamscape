@@ -1,0 +1,37 @@
+# Two services from the same image: the web app, and the nightly dream job.
+# Copy .env.example to .env first; both services read it. The data folder is a bind mount, so the
+# build args PUID/PGID should match the user that owns it.
+
+services:
+  app:
+    build: .
+    image: dreamscape
+    container_name: dreamscape
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8000:8000"
+    environment:
+      DATA_DIR: /app/data
+    volumes:
+      - ./data:/app/data
+    healthcheck:
+      test: ["CMD", "python", "scripts/healthcheck.py"]
+      interval: 30s
+      timeout: 5s
+      start_period: 15s
+      retries: 3
+
+  # The scheduler runs the dreaming job at DREAM_TIME (HH:MM in TIMEZONE, default 03:00) every
+  # night, and nothing else. It shares the data volume, so the lockfile in data/ is the same one
+  # the "Dream now" button uses.
+  dreamer:
+    build: .
+    image: dreamscape
+    container_name: dreamscape-dreamer
+    restart: unless-stopped
+    command: ["python", "scripts/dream_scheduler.py"]
+    environment:
+      DATA_DIR: /app/data
+      DREAM_TIME: "${DREAM_TIME:-03:00}"
+    volumes:
+      - ./data:/app/data

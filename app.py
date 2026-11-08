@@ -2,7 +2,8 @@
 
 Every route below is behind a session: API calls without one get 401, pages redirect to /login.
 State-changing requests also need the CSRF header. The current user is set for the call, so the
-data modules work inside that user's folder.
+data modules work inside that user's folder. `/healthz` is the one route without a session, so a
+container health check can reach it.
 """
 import asyncio
 import html
@@ -146,6 +147,17 @@ def auth_page(mode: str, request: Request) -> HTMLResponse:
         "next": html.escape(request.query_params.get("next") or "/", quote=True),
         "register": "1" if self_registration else "0",
     })
+
+
+@app.get("/healthz")
+def healthz():
+    """Unauthenticated, for the container health check. Says whether the app can read its own data."""
+    try:
+        with db.transaction() as conn:
+            conn.execute("SELECT 1").fetchone()
+    except Exception as error:
+        return JSONResponse(status_code=503, content={"status": "unavailable", "reason": str(error)})
+    return {"status": "ok"}
 
 
 @app.get("/favicon.ico")

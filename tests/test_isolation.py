@@ -35,6 +35,13 @@ def test_pages_and_api_require_a_session(conn):
     assert client_for(conn, admin).get("/api/admin/users").status_code == 200
 
 
+def test_healthz_needs_no_session(conn):
+    """The only route without a session, because a container health check cannot log in."""
+    response = TestClient(app.app).get("/healthz")
+    assert response.status_code == 200
+    assert response.json()["status"] == "ok"
+
+
 def test_wiki_tool_only_sees_its_own_users_pages(conn):
     admin = make_user(conn, "wikiaadmin", role="admin")
     bob = make_user(conn, "wikibob")

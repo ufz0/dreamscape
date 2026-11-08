@@ -1,0 +1,21 @@
+# The image runs from a data volume, so the host's data folder is not part of it.
+data/
+data-backup-*/
+
+# Secrets come from the environment, not from the image.
+.env
+
+.git/
+.venv/
+.pytest_cache/
+__pycache__/
+*.pyc
+*.log
+
+# Not needed to run the app
+tests/
+design/
+docs/
+node_modules/
+.DS_Store
+run.sh
