@@ -8,6 +8,8 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+import httpx
+
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
@@ -18,6 +20,7 @@ os.environ["TIMEZONE"] = "Europe/Vienna"
 import pytest
 
 import accounts
+import apikeys
 import appdata
 import connections
 import db
@@ -33,7 +36,7 @@ PASSWORD = "a long enough password"
 def conn():
     connection = db.connect()
     for table in ("usage_events", "sessions", "login_attempts", "audit", "app_settings", "users",
-                  "connections", "connection_models", "runs"):
+                  "connections", "connection_models", "runs", "uploads", "api_keys"):
         connection.execute(f"DELETE FROM {table}")
     connection.commit()
     # The module-level caches are per process, so they have to be cleared for each test: the
@@ -41,6 +44,7 @@ def conn():
     connections.GATES.clear()
     connections.BOOTSTRAPPED.clear()
     runs.RUNS.clear()
+    apikeys.clear()
     # User ids are reused once the rows are gone, so the folders must be cleared as well:
     # otherwise a test reads files another test left in the same folder.
     for folder in appdata.USERS.glob("*"):
@@ -91,22 +95,28 @@ def finish(run, timeout=10):
 # ---------- the fake upstream ----------
 
 class FakeResponse:
-    def __init__(self, payload):
+    """A stand-in response. `status` is here so a test can make the upstream refuse."""
+
+    def __init__(self, payload, status: int = 200):
         self.payload = payload
+        self.status_code = status
 
     def raise_for_status(self):
-        return None
+        if self.status_code >= 400:
+            raise httpx.HTTPStatusError(f"upstream {self.status_code}", request=None, response=self)
 
     def json(self):
         return self.payload
 
 
 class FakeStream:
-    def __init__(self, lines):
+    def __init__(self, lines, status: int = 200):
         self.lines = lines
+        self.status_code = status
 
     def raise_for_status(self):
-        return None
+        if self.status_code >= 400:
+            raise httpx.HTTPStatusError(f"upstream {self.status_code}", request=None, response=self)
 
     async def aiter_lines(self):
         for line in self.lines:
@@ -147,7 +157,11 @@ class FakeUpstream:
 
     async def post(self, path, json=None):
         self.calls.append(("POST", path, json))
-        return FakeResponse(self.script.get("chat") or {"choices": [{"message": {}}], "usage": {}})
+        if path.endswith("/embeddings"):
+            return FakeResponse(self.script.get("embeddings") or {"data": []},
+                                status=self.script.get("status", 200))
+        return FakeResponse(self.script.get("chat") or {"choices": [{"message": {}}], "usage": {}},
+                            status=self.script.get("status", 200))
 
     async def __aenter__(self):
         return self

@@ -219,8 +219,10 @@ def test_login_lockout_after_five_failures(conn):
 
 
 def test_self_registration_setting_is_off_by_default(conn):
+    # allow_api is the one flag that is on by default: a key is only a key when this is on.
     assert accounts.settings(conn) == {"allow_self_registration": False,
-                                               "count_dreaming_toward_limits": False}
+                                               "count_dreaming_toward_limits": False,
+                                       "allow_api": True}
     admin = make_user(conn, "admin4", role="admin")
     settings = accounts.set_setting(conn, admin, "allow_self_registration", True)
     assert settings["allow_self_registration"] is True
