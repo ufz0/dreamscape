@@ -132,6 +132,7 @@
             <button class="icon-btn" id="next-period" data-icon="chevron" title="Next period" aria-label="Next period"></button>
             <button class="small-button" id="this-period" title="Jump back to the current period">Now</button>
           </div>
+          <div class="segmented" id="source" role="group" aria-label="Source"></div>
           <span class="spacer"></span>
           <div class="field">
             <label for="user-filter">Chart for one user</label>
@@ -149,6 +150,12 @@
             <tbody id="usage-rows"></tbody>
           </table>
         </div>
+
+        <!-- Only when one account is selected: what its keys were used for in this period. -->
+        <section class="key-breakdown" id="key-breakdown" hidden>
+          <h3>Keys for this account</h3>
+          <div id="key-rows"></div>
+        </section>
 
         <div class="chart-box">
           <div id="chart"></div>

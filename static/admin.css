@@ -134,6 +134,8 @@
 /* Flat fills, no gradients: chat is the accent, dreaming the warning tone, users the graph tones. */
 #chart .bar { fill: var(--chart-1); }
 #chart .dreaming { fill: var(--chart-2); }
+/* The API share is a third tone, so a bar that has all three reads as three things. */
+#chart .api { fill: var(--chart-3); }
 #chart .u0 { fill: var(--chart-1); }
 #chart .u1 { fill: var(--chart-2); }
 #chart .u2 { fill: var(--chart-3); }

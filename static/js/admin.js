@@ -15,6 +15,7 @@ const ui = {
   prevPeriod: el("prev-period"), nextPeriod: el("next-period"), currentPeriod: el("this-period"),
   totals: el("totals"), usageHead: el("usage-head"), usageRows: el("usage-rows"), filter: el("user-filter"),
   stacked: el("stacked"), export: el("export-csv"), chart: el("chart"), legend: el("chart-legend"), caption: el("chart-caption"),
+  source: el("source"), keyBreakdown: el("key-breakdown"), keyRows: el("key-rows"),
   provider: el("search-provider"), addConnection: el("add-connection"), connectionList: el("connection-list"),
 };
 
@@ -25,7 +26,10 @@ const COLUMNS = [
   { key: "requests", label: "Requests", sortable: true }, { key: "share", label: "Share", sortable: true },
   { key: "daily", label: "Today", sortable: false }, { key: "weekly", label: "This week", sortable: false },
 ];
-const TOTALS = [["Total tokens", "tokens"], ["Prompt", "prompt_tokens"], ["Completion", "completion_tokens"], ["Chat", "chat_tokens"], ["Dreaming", "dreaming_tokens"]];
+const TOTALS = [["Total tokens", "tokens"], ["Prompt", "prompt_tokens"], ["Completion", "completion_tokens"],
+  ["Chat", "chat_tokens"], ["Dreaming", "dreaming_tokens"], ["API", "api_tokens"]];
+// What a usage row can be. The first is "everything", which is what the tab shows by default.
+const SOURCES = [["", "All"], ["chat", "Chat"], ["dreaming", "Dreaming"], ["api", "API"]];
 const DATE_FORMAT = { year: "numeric", month: "short", day: "2-digit" };
 const TIME_FORMAT = { month: "short", day: "2-digit", hour: "2-digit", minute: "2-digit" };
 
@@ -42,13 +46,23 @@ const SETTINGS_FIELDS = [
   { key: "max_runs_global", label: "Runs at one time app-wide", kind: "number", help: "0 means no maximum" },
   { key: "max_run_minutes", label: "Longest a run may go, in minutes", kind: "number", help: "0 means no maximum" },
   { key: "queue_timeout_seconds", label: "Queue timeout, in seconds", kind: "number", help: "how long a request waits for a slot" },
+  { key: "allow_api", label: "Allow API access", kind: "check", help: "on by default. Off stops every key, and an account can still be turned off in the Users tab." },
+  { key: "api_rate_limit_per_minute", label: "Requests per minute per API key", kind: "number", help: "60 by default. 0 means no limit." },
+  { key: "api_max_concurrent_per_user", label: "API requests at one time per account", kind: "number", help: "4 by default" },
+  { key: "max_upload_mb", label: "Largest uploaded file, in MB", kind: "number", help: "20 by default" },
+  { key: "max_files_per_message", label: "Files per message", kind: "number", help: "5 by default" },
+  { key: "upload_quota_mb", label: "Storage per account, in MB", kind: "number", help: "500 by default" },
+  { key: "attachment_inline_chars", label: "Most characters of a file shown to the model", kind: "number", help: "30000 by default. Longer files are read with the read_file tool." },
+  { key: "attachment_tool_iterations", label: "read_file calls per turn", kind: "number", help: "12 by default" },
+  { key: "pdf_max_pages", label: "Most PDF pages read", kind: "number", help: "40 by default" },
+  { key: "upload_extensions", label: "Allowed file extensions", kind: "text", help: "comma-separated. The content is checked too, so a renamed executable is not a text file." },
 ];
 
 // Which value a bar or a cell should show, in the same words the app uses when a limit is reached.
 const SOURCE_TEXT = { own: "their own", global: "the global default", unlimited: "set unlimited", none: "no limit" };
 
 let accounts = null, usage = null, runtime = null, period = "month", anchor = new Date();
-let filterUser = null, stacked = false, sort = { key: "tokens", desc: true }, headers = [];
+let filterUser = null, sourceFilter = "", stacked = false, sort = { key: "tokens", desc: true }, headers = [];
 
 const VIEWS = [[ui.tabUsers, "users"], [ui.tabUsage, "usage"], [ui.tabConnections, "connections"]];
 
@@ -173,7 +187,8 @@ async function loadProvider() {
 
 async function loadUsage() {
   try {
-    usage = await api(`/api/admin/usage?period=${period}&date=${periodDate()}`);
+    usage = await api(`/api/admin/usage?period=${period}&date=${periodDate()}` +
+      (sourceFilter ? `&source=${sourceFilter}` : ""));
   } catch (error) {
     say(`Cannot read usage: ${error.message}`, true);
     return;
@@ -184,6 +199,7 @@ async function loadUsage() {
   renderFilter();
   renderTotals();
   renderUsageTable();
+  renderKeyBreakdown();
   renderChart();
   if (accounts) renderUsers();   // the users table shows tokens for this same period
 }
@@ -216,6 +232,8 @@ function rowActions(user) {
     { label: user.role === "admin" ? "Remove admin" : "Make admin", action: () => setField(user, "role", user.role === "admin" ? "user" : "admin") },
     { label: "Reset password", action: () => resetPassword(user) },
     { label: user.status === "active" ? "Disable" : "Enable", action: () => setField(user, "status", user.status === "active" ? "disabled" : "active") },
+    { label: user.api_access ? "Turn off API access" : "Turn on API access", action: () => setField(user, "api_access", !user.api_access) },
+    { label: "Keys", action: () => openKeys(user) },
     { separator: true },
     { label: "Delete", danger: true, action: () => confirmDelete(user) },
   ];
@@ -293,6 +311,46 @@ function confirmDelete(user) {
   });
 }
 
+// An admin can revoke any key, but cannot read it: only the hash and the prefix are stored.
+function openKeys(user) {
+  openDialog(`Keys for ${escapeHtml(user.username)}`, (card) => {
+    const list = document.createElement("div");
+    list.className = "key-list";
+    card.append(paragraph(`API access is ${user.api_access ? "on" : "off"} for this account. ` +
+      "A key is shown once, when it is created, so only the name and prefix are listed here."), list);
+    api("/api/admin/keys").then((data) => {
+      const keys = data.keys.filter((key) => key.user_id === user.id);
+      if (!keys.length) {
+        list.append(paragraph("No keys for this account."));
+        return;
+      }
+      for (const key of keys) {
+        const row = document.createElement("div");
+        row.className = "key-row";
+        const name = document.createElement("span");
+        name.className = "key-name";
+        name.textContent = key.name;
+        const details = document.createElement("span");
+        details.className = "key-details";
+        details.textContent = `${key.prefix}… · created ${key.created.slice(0, 10)}` +
+          (key.expires ? ` · expires ${key.expires.slice(0, 10)}` : "") +
+          (key.last_used ? ` · last used ${key.last_used.slice(0, 10)}` : " · never used") +
+          ` · ${formatK(key.tokens_used || 0)} tokens`;
+        const revoke = button(key.revoked ? "revoked" : "Revoke", async () => {
+          try {
+            await api(`/api/keys/${encodeURIComponent(key.id)}/revoke`, { method: "POST" });
+            revoke.textContent = "revoked";
+            revoke.disabled = true;
+          } catch (error) { revoke.textContent = error.message; }
+        });
+        revoke.disabled = key.revoked;
+        row.append(name, details, revoke);
+        list.append(row);
+      }
+    }).catch((error) => list.append(paragraph(`Cannot read keys: ${error.message}`)));
+  });
+}
+
 function openCreateUser() {
   openDialog("Create user", (card) => {
     const name = field("Username", "");
@@ -324,6 +382,17 @@ function openCreateUser() {
   });
 }
 
+function renderKeyBreakdown() {
+  const keys = usage?.per_key || [];
+  if (!filterUser || !keys.length) { ui.keyBreakdown.hidden = true; ui.keyRows.innerHTML = ""; return; }
+  ui.keyRows.innerHTML = keys.map((key) => `<div class="key-row">
+    <span class="key-name">${escapeHtml(key.name)}</span>
+    <span class="key-details">${escapeHtml(key.prefix)}… · ${key.requests} requests · ${formatK(key.tokens)} tokens` +
+      `${key.estimated ? ` (${key.estimated} estimated)` : ""} · last used ${escapeHtml(key.last_used || "never")}</span>
+  </div>`).join("");
+  ui.keyBreakdown.hidden = false;
+}
+
 function renderAudit() {
   ui.auditRows.innerHTML = accounts.audit.map((entry) => `<tr>
     <td class="value">${escapeHtml(entry.actor)}</td><td class="action">${escapeHtml(entry.action)}</td>
@@ -336,15 +405,17 @@ function renderAudit() {
 
 function renderTotals() {
   const totals = usage.totals;
-  const marks = totals.estimated_requests ? " ~" : "";
+  // An estimate mark belongs on a number that is one. A zero is not an estimate, so it is not marked.
+  const marks = (value) => (value && totals.estimated_requests ? " ~" : "");
   const title = (value) => `${value} tokens${totals.estimated_requests ? `, ${totals.estimated_requests} estimated calls` : ""}`;
   const row = (label, key) => `<div class="usage-row"><span class="label">${label}</span>` +
-    `<span class="value" title="${escapeHtml(title(totals[key]))}">${formatK(totals[key])}${marks}</span></div>`;
+    `<span class="value" title="${escapeHtml(title(totals[key]))}">${formatK(totals[key])}${marks(totals[key])}</span></div>`;
 
   // Numbers the engine did not count are named as estimates, not presented as fact.
+  const counted = totals.estimated_requests === 1 ? "is an estimate" : "are estimates";
   ui.totals.innerHTML = TOTALS.map((entry) => row(entry[0], entry[1])).join("") +
     `<div class="usage-row"><span class="label">Requests</span><span class="value" title="${totals.rows} recorded calls">${totals.requests}</span></div>` +
-    (totals.estimated_requests ? `<p class="muted">${totals.estimated_requests} of those calls are estimates (characters / 4).</p>` : "");
+    (totals.estimated_requests ? `<p class="muted">${totals.estimated_requests} of those calls ${counted} (characters / 4).</p>` : "");
 }
 
 function buildUsageHead() {
@@ -406,6 +477,7 @@ function setFilter(userId) {
   filterUser = userId;
   ui.filter.value = userId || "";
   renderUsageTable();
+  renderKeyBreakdown();
   renderChart();
 }
 
@@ -421,7 +493,7 @@ function renderFilter() {
 // Empty buckets are added so the chart shows the whole period, not only the days that had usage.
 function series() {
   const known = new Map((usage?.chart || []).map((bucket) => [bucket.label, bucket]));
-  const blank = (label) => ({ label, tokens: 0, chat: 0, dreaming: 0, users: {}, estimated: 0 });
+  const blank = (label) => ({ label, tokens: 0, chat: 0, dreaming: 0, api: 0, users: {}, estimated: 0 });
   if (period === "all") return usage?.chart || [];
 
   const labels = [];
@@ -446,7 +518,8 @@ function colorMap() {
 
 function segments(bucket, colors) {
   if (filterUser) return [{ value: bucket.users[String(filterUser)] || 0, className: `u${colors.get(String(filterUser)) || 0}` }];
-  if (!stacked) return [{ value: bucket.chat, className: "bar" }, { value: bucket.dreaming, className: "dreaming" }];
+  if (!stacked) return [{ value: bucket.chat, className: "bar" }, { value: bucket.dreaming, className: "dreaming" },
+    { value: bucket.api, className: "api" }];
   return Object.entries(bucket.users).filter(([, value]) => value > 0).sort((a, b) => b[1] - a[1])
     .map(([key, value]) => ({ value, className: `u${colors.get(key) || 0}` }));
 }
@@ -503,7 +576,7 @@ function renderLegend(colors) {
     const row = (usage?.per_user || []).find((entry) => rowKey(entry) === String(filterUser));
     items = [{ name: row ? row.username : "selected user", color: colors.get(String(filterUser)) || 0 }];
   } else {
-    items = [{ name: "chat", color: 0 }, { name: "dreaming", color: 1 }];
+    items = [{ name: "chat", color: 0 }, { name: "dreaming", color: 1 }, { name: "api", color: 2 }];
   }
   ui.legend.innerHTML = items.map((item) => `<span><i style="background:var(--chart-${item.color + 1})"></i>${escapeHtml(item.name)}</span>`).join("");
 }
@@ -538,6 +611,16 @@ function buildControls() {
     }, "");
     tab.classList.toggle("on", item.key === period);
     ui.period.append(tab);
+  }
+
+  for (const [key, label] of SOURCES) {
+    const tab = button(label, () => {
+      sourceFilter = key;
+      for (const child of ui.source.children) child.classList.toggle("on", child === tab);
+      loadUsage();
+    }, "");
+    tab.classList.toggle("on", key === sourceFilter);
+    ui.source.append(tab);
   }
 
   ui.prevPeriod.addEventListener("click", () => shiftPeriod(-1));
