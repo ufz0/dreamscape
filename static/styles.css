@@ -857,6 +857,66 @@ textarea.editor { width: 100%; min-height: 320px; font-family: var(--mono); font
 .auth-links { margin-top: 16px; font-size: 13px; color: var(--muted); }
 .auth-links a { color: var(--accent); }
 
+/* ---------- attachments ---------- */
+
+/* The chips live inside the composer card, above the textarea: they are part of the message being
+   written, not a separate panel. Sizes are the same scale as the rest of the card. */
+.chips { display: flex; flex-wrap: wrap; gap: 6px; padding: 0 2px 8px; }
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--bubble);
+  padding: 6px 8px;
+  max-width: 100%;
+}
+.chip .thumb { flex: none; width: 28px; height: 28px; border-radius: 7px; background: var(--hover);
+  display: grid; place-items: center; color: var(--muted); overflow: hidden; }
+.chip .thumb img { width: 100%; height: 100%; object-fit: cover; }
+.chip .meta { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.chip .name { font-size: 13px; }
+.chip .size { font-family: var(--mono); font-size: 11.5px; color: var(--muted); }
+.chip .progress { display: block; height: 3px; border-radius: 2px; background: var(--border); overflow: hidden; }
+.chip .progress span { display: block; height: 100%; background: var(--accent); transition: width 120ms ease; }
+.chip .chip-error { font-size: 12.5px; color: var(--danger); }
+.chip.error { border-color: color-mix(in srgb, var(--danger) 40%, var(--border)); }
+.chip.warn .chip-error { color: var(--warn); }
+.chip .chip-close { width: 24px; height: 24px; border-radius: 7px; }
+
+/* What the message would cost before it is sent. An estimate, so it says so. */
+.cost { margin: 6px 2px 0; font-size: 12.5px; color: var(--muted); }
+.cost.over { color: var(--warn); }
+
+/* The chat is the place a file is dropped, so the outline is on the whole area, not on one card. */
+.main.dropping { outline: 1px dashed color-mix(in srgb, var(--accent) 55%, var(--border)); outline-offset: -12px; }
+
+/* Attachment chips inside a user message: a link to the file, with its size. */
+.attached { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.attached-item { display: inline-flex; align-items: center; gap: 7px; border: 1px solid var(--border);
+  border-radius: 10px; background: var(--panel); padding: 6px 9px; text-decoration: none; color: var(--text); }
+.attached-item:hover { background: var(--hover); }
+.attached-item img { width: 24px; height: 24px; border-radius: 6px; object-fit: cover; }
+.attached-item .attached-name { font-size: 13px; }
+.attached-item .attached-size { font-family: var(--mono); font-size: 11.5px; color: var(--muted); }
+
+/* ---------- settings: API keys and storage ---------- */
+
+.shown-key { font-family: var(--mono); font-size: 13px; background: var(--hover); border-radius: 8px;
+  padding: 8px 10px; margin: 8px 0; }
+.key-list, .storage-list { display: flex; flex-direction: column; gap: 6px; margin-top: 10px; }
+.key-row, .storage-row { display: flex; align-items: center; gap: 8px; font-size: 13px; }
+.key-name, .storage-name { flex: none; max-width: 45%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.storage-name { color: var(--text); text-decoration: none; }
+.storage-name:hover { color: var(--accent); }
+.key-details, .storage-size, .storage-chat { color: var(--muted); font-family: var(--mono); font-size: 11.5px; }
+.key-details, .storage-chat { flex: 1; min-width: 0; }
+.storage-size { flex: none; }
+.key-row .small-button, .storage-row .small-button { margin-left: auto; }
+.how-to-use { margin-top: 12px; border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; }
+.how-to-use pre { margin: 0 0 8px; font-family: var(--mono); font-size: 12px; white-space: pre-wrap; }
+
 /* ---------- small screens ---------- */
 
 @media (max-width: 768px) {

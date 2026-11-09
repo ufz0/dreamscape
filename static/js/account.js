@@ -97,6 +97,15 @@ function fillUsage(block, usage, options) {
       row.append(reset);
     }
 
+    // Where the tokens in this window came from, when it is more than one thing.
+    const split = Object.entries(window.sources || {}).filter(([, value]) => Number(value) > 0);
+    if (split.length > 1) {
+      const line = document.createElement("p");
+      line.className = "muted";
+      line.textContent = `From this window: ${split.map(([name, value]) => `${formatK(value)} ${name}`).join(", ")}.`;
+      block.append(line);
+    }
+
     block.append(row);
   }
 
@@ -107,10 +116,10 @@ function fillUsage(block, usage, options) {
     block.append(note);
   }
 
-  if (usage && usage.counted_source && usage.counted_source !== "chat only") {
+  if (usage && usage.counted_source) {
     const note = document.createElement("p");
     note.className = "muted";
-    note.textContent = "Dreaming tokens are counted toward these limits.";
+    note.textContent = `These numbers count ${usage.counted_source} calls.`;
     block.append(note);
   }
 }

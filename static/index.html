@@ -79,10 +79,12 @@
       <section class="composer-area">
         <div class="composer-inner">
           <div class="composer" id="composer">
+            <div class="chips" id="chips" hidden aria-label="Attached files"></div>
+            <input type="file" id="file-picker" multiple hidden>
             <textarea id="input" rows="1" placeholder="How can I help you today?" aria-label="Message"></textarea>
             <div class="composer-row">
-              <button class="icon-btn" id="attach" data-icon="plus" disabled
-                      title="Not supported yet" aria-label="Attach file"></button>
+              <button class="icon-btn" id="attach" data-icon="paperclip"
+                      title="Attach a file" aria-label="Attach a file"></button>
               <button class="icon-btn" id="options" data-icon="sliders"
                       title="Temperature, system prompt, wiki" aria-label="Message options"></button>
               <button class="effort-btn" id="effort" title="Reasoning effort" aria-label="Reasoning effort" aria-haspopup="menu">

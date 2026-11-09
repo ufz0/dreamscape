@@ -4,12 +4,14 @@ import { icon } from "./icons.js";
 import { openMenu, openPanel, toast } from "./ui.js";
 import { ChatView, stopNote } from "./chat.js";
 import { follow as followRun, send as sendRun, stop as stopRun, TERMINAL } from "./runs.js";
-import { settings, startShell, renderList, setActiveChat, currentModel, loadModels, greeting,
+import { settings, startShell, renderList, setActiveChat, currentModel, loadModels, modelInfo, greeting,
   controlRow, numberInput, textArea, checkbox, modelGroups, displayName, markRun, setTabDot } from "./shell.js";
 import { save } from "./settings.js";
 import { effortFor, openEffort, paintEffort, remember, clearPending } from "./effort.js";
 import { providerStatus, webToolsFor, rememberWeb, clearPending as clearWebPending } from "./webtools.js";
 import { account, mustChange } from "./account.js";
+import { setup as setupAttachments, files as attachedFiles, attachments as attachedAttachments,
+  busy as uploading, clear as clearAttachments } from "./attachments.js";
 
 const el = (id) => document.getElementById(id);
 const ui = {
@@ -17,6 +19,7 @@ const ui = {
   title: el("chat-title"), chatMenu: el("chat-menu"), greeting: el("greeting-text"), pills: el("pills"),
   input: el("input"), send: el("send"), modelBtn: el("model-btn"), options: el("options"),
   effort: el("effort"), attach: el("attach"), disclaimer: el("disclaimer"),
+  chips: el("chips"), picker: el("file-picker"),
 };
 
 let chatId = null;
@@ -267,10 +270,16 @@ function grow() {
   ui.input.style.height = `${Math.min(Math.max(ui.input.scrollHeight, 24), limit)}px`;
 }
 
+// A message can be just a file, so the send button is about content in either form. While a file is
+// still uploading it is not ready, and sending is off.
+function canSend() {
+  return !uploading() && Boolean(attachedFiles().length || ui.input.value.trim());
+}
+
 function refreshSendButton() {
   if (generating) return;
   if (limitUntil || mustChange()) { ui.send.disabled = true; return; }
-  ui.send.disabled = !ui.input.value.trim();
+  ui.send.disabled = !canSend();
 }
 
 function setGenerating(on) {
@@ -278,7 +287,7 @@ function setGenerating(on) {
   ui.send.innerHTML = icon(on ? "square" : "arrowUp", 16);
   ui.send.title = on ? "Stop generating" : "Send";
   ui.send.setAttribute("aria-label", on ? "Stop generating" : "Send");
-  ui.send.disabled = on ? false : !ui.input.value.trim();
+  ui.send.disabled = on ? false : !canSend();
   ui.modelBtn.disabled = on;
   ui.options.disabled = on;
 }
@@ -300,7 +309,9 @@ ui.send.addEventListener("click", () => {
 
 async function send(text, regenerate = false) {
   text = (text || "").trim();
-  if (!text || generating) return;
+  const files = attachedFiles();
+  if (generating) return;
+  if (!text && !files.length) return;
   if (limitUntil || mustChange()) return;
 
   const level = effortFor(chatId);
@@ -313,7 +324,7 @@ async function send(text, regenerate = false) {
     });
     chatId = created.conversation.id;
     setActiveChat(chatId);
-    ui.title.textContent = text.slice(0, 40);
+    ui.title.textContent = text.slice(0, 40) || attachedAttachments()[0]?.name?.slice(0, 40) || "New chat";
     history.replaceState(null, "", `?c=${encodeURIComponent(chatId)}`);
   }
   remember(chatId, level);
@@ -326,6 +337,7 @@ async function send(text, regenerate = false) {
       message: text, model: currentModel(), system: settings.system,
       temperature: settings.temperature, wiki_index: settings.wikiIndex, regenerate,
       reasoning_effort: level, web_search: web, generate_titles: settings.generateTitles,
+      files,
     });
   } catch (error) {
     // A limit and a chat that is still generating are both things the thread should say, not a toast.
@@ -350,6 +362,7 @@ async function send(text, regenerate = false) {
     view.assistantMessage();
   }
   ui.input.value = "";
+  clearAttachments();      // the message is on its way; the chips belong to the thread now
   grow();
   view.model = currentModel();
   view.stickToBottom = true;
@@ -455,7 +468,15 @@ function paintModel() {
 
 ui.effort.addEventListener("click", () => openEffort(ui.effort, currentModel(), chatId, () => paintEffort(ui.effort, currentModel(), chatId)));
 
-ui.attach.disabled = true;
+// Attachments: the picker, drag & drop and paste live in attachments.js; this is the wiring to the
+// model that is chosen, because only a model flagged for vision can be sent an image.
+setupAttachments({
+  ui,
+  chatId: () => chatId,
+  canSeeImages: () => modelInfo(currentModel())?.supports_vision !== false,
+  modelInfo: () => modelInfo(currentModel()),
+  onChanged: () => refreshSendButton(),
+});
 
 // ---------- empty state ----------
 

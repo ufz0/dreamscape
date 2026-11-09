@@ -32,6 +32,10 @@ const PATHS = {
   globe: `<circle cx="12" cy="12" r="7.5"/><path d="M4.5 12h15"/><path d="M12 4.5c2.4 2.1 2.4 7.3 0 9.5M12 4.5c-2.4 2.1-2.4 7.3 0 9.5"/>`,
   play: `<path d="M7 5.5l12 6.5-12 6.5z"/>`,
   fit: `<path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/>`,
+  // Attachments. The paperclip is the composer's attach button; the page is what a chip shows for a
+  // file that is not an image.
+  paperclip: `<path d="M18.5 11.5l-6.8 6.8a4.2 4.2 0 0 1-6-6l7.2-7.2a3.2 3.2 0 0 1 4.5 4.5l-6.5 6.5a1.6 1.6 0 0 1-2.2-2.2l5.6-5.6"/>`,
+  file: `<path d="M14 3.5H7A2 2 0 0 0 5 5.5v13a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V9z"/><path d="M14 3.5V9h5.5"/>`,
 };
 
 export function icon(name, size = 18) {

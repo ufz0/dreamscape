@@ -3,6 +3,7 @@ import { escapeHtml } from "./api.js";
 import { renderMarkdown } from "./markdown.js";
 import { icon } from "./icons.js";
 import { canShowNote, noteText } from "./notes.js";
+import { messageChips } from "./attachments.js";
 import { TERMINAL } from "./runs.js";
 
 // Which messages the user expanded in this session.
@@ -329,7 +330,7 @@ export class ChatView {
 
     for (const record of turns) {
       if (record.role === "user") {
-        this.addUser(record.content || "", { showActions: true });
+        this.addUser(record.content || "", { showActions: true, attachments: record.attachments });
         continue;
       }
       if (record.role === "tool") continue;
@@ -392,13 +393,16 @@ export class ChatView {
     this.scrollToBottom();
   }
 
-  addUser(text, { showActions } = {}) {
+  addUser(text, { showActions, attachments } = {}) {
     const message = document.createElement("div");
     message.className = "msg user";
     const bubble = document.createElement("div");
     bubble.className = "bubble";
     bubble.innerHTML = renderMarkdown(text);
     message.append(bubble);
+    // The files this message attached, as chips. The transcript holds only their metadata, so these
+    // are links to the endpoints that serve them to the owner.
+    if (attachments?.length) message.append(messageChips(attachments));
     if (showActions) {
       message.append(actions("", () => text, { edit: this.onEdit }));
     }
@@ -429,7 +433,8 @@ export class ChatView {
     this.open = true;
     for (const record of records) {
       if (record.role === "user") {
-        this.handle({ type: "user_message", content: record.content || "", run: record.run });
+        this.handle({ type: "user_message", content: record.content || "", run: record.run,
+                      attachments: record.attachments });
         continue;
       }
       if (record.role === "tool") {
@@ -465,7 +470,7 @@ export class ChatView {
     if (event.type === "user_message") {
       if (this.shownRuns.has(event.run)) return;
       this.shownRuns.add(event.run);
-      this.addUser(event.content || "", { showActions: true });
+      this.addUser(event.content || "", { showActions: true, attachments: event.attachments });
       if (!this.current) this.assistantMessage();   // the answer to this message follows it
       return;
     }

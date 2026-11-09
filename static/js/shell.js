@@ -4,6 +4,8 @@ import { icon } from "./icons.js";
 import { openMenu, openPanel, openDialog, closePopups, toast } from "./ui.js";
 import { load, save, applyTheme, greeting } from "./settings.js";
 import { loadMe, account, mustChange, initial, readUsage, usageBlock, openChangePassword, logout } from "./account.js";
+import { apiKeysSection } from "./apikeys.js";
+import { storageSection } from "./attachments.js";
 
 export const settings = load();
 
@@ -22,6 +24,14 @@ export function currentModel() {
 
 // The name a model is shown by. The id is what the server needs; a display name set by an admin is
 // what a person reads, and the connection it belongs to is what tells two same-named models apart.
+export function modelInfo(namespaced) {
+  for (const group of groups) {
+    const model = group.models.find((entry) => entry.namespaced === namespaced);
+    if (model) return model;
+  }
+  return null;
+}
+
 export function displayName(namespaced) {
   for (const group of groups) {
     const model = group.models.find((entry) => entry.namespaced === namespaced);
@@ -393,6 +403,9 @@ export async function openSettings() {
       })),
       dreamButton(),
     ));
+
+    card.append(apiKeysSection());
+    card.append(storageSection());
   });
 }
 
