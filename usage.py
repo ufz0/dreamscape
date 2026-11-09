@@ -1,7 +1,7 @@
 """Token usage: record every upstream call, and aggregate by period in local time.
 
-One row per upstream call, including each iteration of the tool loop. `source` is "chat" or
-"dreaming". `estimated` is set when the server did not report usage, in which case the numbers
+One row per upstream call, including each iteration of the tool loop. `source` is "chat", "dreaming"
+or "api". `estimated` is set when the server did not report usage, in which case the numbers
 are characters / 4 rather than what the engine counted, and the UI marks them as estimates.
 
 Rows are stored in UTC; periods (day/month/year) are computed in the local timezone from .env,
@@ -14,6 +14,7 @@ import db
 
 CHARS_PER_TOKEN = 4
 PER_MESSAGE_OVERHEAD = 4
+SOURCES = limits.SOURCES      # defined in limits.py, which is also what the window check uses
 
 
 def token_field(usage: dict, *keys) -> int:
@@ -44,7 +45,8 @@ def estimate(messages: list[dict], completion_text: str) -> dict:
 
 
 def record(conn, user_id, usage: dict, source: str, model: str, conversation_id: str | None = None,
-           estimated: bool = False, at: datetime | None = None, connection_id: int | None = None) -> None:
+           estimated: bool = False, at: datetime | None = None, connection_id: int | None = None,
+           key_id: str | None = None) -> None:
     """One row for one upstream call. `at` is for the seed script and the tests; normally now."""
     prompt = token_field(usage, "prompt_tokens", "input_tokens")
     completion = token_field(usage, "completion_tokens", "output_tokens")
@@ -54,9 +56,9 @@ def record(conn, user_id, usage: dict, source: str, model: str, conversation_id:
     moment = (at or datetime.now(timezone.utc)).astimezone(timezone.utc)
     conn.execute(
         "INSERT INTO usage_events (user_id, timestamp, prompt_tokens, completion_tokens, total_tokens, "
-        "model, source, conversation_id, estimated, connection_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "model, source, conversation_id, estimated, connection_id, key_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (user_id, moment.isoformat(timespec="seconds"), prompt, completion, total, model or "", source,
-         conversation_id, 1 if estimated else 0, connection_id),
+         conversation_id, 1 if estimated else 0, connection_id, key_id),
     )
 
 
@@ -94,12 +96,25 @@ def period_range(period: str, target: date | None = None) -> tuple[datetime, dat
     return start.astimezone(timezone.utc), end.astimezone(timezone.utc), label
 
 
-def aggregate(conn, period: str, target: date | None = None, user_id: int | None = None) -> dict:
-    """Totals for a period, per user, and the buckets for the chart."""
+def share_key(source: str) -> str:
+    """Which totals key a row belongs to. Anything unknown counts as chat, as it always did."""
+    return source if source in SOURCES else "chat"
+
+
+def aggregate(conn, period: str, target: date | None = None, user_id: int | None = None,
+             source: str | None = None) -> dict:
+    """Totals for a period, per user, and the buckets for the chart.
+
+    `source` narrows it to one kind of call (chat, dreaming, api); empty or None is everything,
+    which is what the admin Usage tab shows by default.
+    """
     start, end, label = period_range(period, target)
     params = [start.isoformat(timespec="seconds"), end.isoformat(timespec="seconds")]
     sql = ("SELECT user_id, timestamp, prompt_tokens, completion_tokens, total_tokens, source, "
            "estimated FROM usage_events WHERE timestamp >= ? AND timestamp < ?")
+    if source in SOURCES:
+        sql += " AND source = ?"
+        params.append(source)
     if user_id:
         sql += " AND user_id = ?"
         params.append(user_id)
@@ -107,7 +122,7 @@ def aggregate(conn, period: str, target: date | None = None, user_id: int | None
 
     usernames = {row["id"]: row["username"] for row in conn.execute("SELECT id, username FROM users")}
     totals = {"tokens": 0, "prompt_tokens": 0, "completion_tokens": 0, "chat_tokens": 0,
-             "dreaming_tokens": 0, "requests": 0, "estimated_requests": 0, "rows": len(rows)}
+             "dreaming_tokens": 0, "api_tokens": 0, "requests": 0, "estimated_requests": 0, "rows": len(rows)}
     per_user: dict[int, dict] = {}
     buckets: dict[str, dict] = {}
     tz = limits.tz()
@@ -118,26 +133,20 @@ def aggregate(conn, period: str, target: date | None = None, user_id: int | None
         totals["completion_tokens"] += row["completion_tokens"]
         totals["requests"] += 1
         totals["estimated_requests"] += 1 if row["estimated"] else 0
-        if row["source"] == "dreaming":
-            totals["dreaming_tokens"] += row["total_tokens"]
-        else:
-            totals["chat_tokens"] += row["total_tokens"]
+        totals[share_key(row["source"]) + "_tokens"] += row["total_tokens"]
 
         key = row["user_id"]
         if key not in per_user:
             per_user[key] = {"user_id": key, "username": usernames.get(key) or "(deleted user)",
                              "tokens": 0, "prompt_tokens": 0, "completion_tokens": 0, "requests": 0,
-                             "chat_tokens": 0, "dreaming_tokens": 0, "estimated": 0}
+                             "chat_tokens": 0, "dreaming_tokens": 0, "api_tokens": 0, "estimated": 0}
         entry = per_user[key]
         entry["tokens"] += row["total_tokens"]
         entry["prompt_tokens"] += row["prompt_tokens"]
         entry["completion_tokens"] += row["completion_tokens"]
         entry["requests"] += 1
         entry["estimated"] += 1 if row["estimated"] else 0
-        if row["source"] == "dreaming":
-            entry["dreaming_tokens"] += row["total_tokens"]
-        else:
-            entry["chat_tokens"] += row["total_tokens"]
+        entry[share_key(row["source"]) + "_tokens"] += row["total_tokens"]
 
         moment = limits.parse_time(row["timestamp"]).astimezone(tz)
         if period == "day":
@@ -146,13 +155,10 @@ def aggregate(conn, period: str, target: date | None = None, user_id: int | None
             key2 = moment.strftime("%m")
         else:
             key2 = moment.strftime("%Y-%m-%d" if period == "month" else "%Y-%m")
-        bucket = buckets.setdefault(key2, {"label": key2, "tokens": 0, "chat": 0, "dreaming": 0,
+        bucket = buckets.setdefault(key2, {"label": key2, "tokens": 0, "chat": 0, "dreaming": 0, "api": 0,
                                            "users": {}, "estimated": 0})
         bucket["tokens"] += row["total_tokens"]
-        if row["source"] == "dreaming":
-            bucket["dreaming"] += row["total_tokens"]
-        else:
-            bucket["chat"] += row["total_tokens"]
+        bucket[share_key(row["source"])] += row["total_tokens"]
         if row["user_id"] is not None:
             bucket_key = str(row["user_id"])
         else:
@@ -186,6 +192,7 @@ def aggregate(conn, period: str, target: date | None = None, user_id: int | None
             row["tokens"] += bucket["tokens"]
             row["chat"] += bucket["chat"]
             row["dreaming"] += bucket["dreaming"]
+            row["api"] += bucket.get("api", 0)
             row["estimated"] += bucket["estimated"]
             for key, value in bucket["users"].items():
                 row["users"][key] = row["users"].get(key, 0) + value
@@ -198,5 +205,33 @@ def aggregate(conn, period: str, target: date | None = None, user_id: int | None
         "period_end": end.astimezone(tz).isoformat(timespec="seconds"),
         "totals": totals,
         "per_user": sorted(per_user.values(), key=lambda row: row["tokens"], reverse=True),
+        "per_key": per_key(conn, period, user_id, target),
         "chart": chart,
     }
+
+
+def per_key(conn, period: str, user_id: int | None = None, target: date | None = None) -> list[dict]:
+    """What each API key was used for in a period. Shown when the admin view selects one user.
+
+    A key that was revoked, or a user that was deleted, still shows here: the usage rows for a period
+    do not change when a key is revoked, which is what the api_keys migration says.
+    """
+    start, end, _ = period_range(period, target)
+    params = [start.isoformat(timespec="seconds"), end.isoformat(timespec="seconds")]
+    sql = ("SELECT key_id, COUNT(*) AS requests, COALESCE(SUM(total_tokens), 0) AS tokens, "
+           "COALESCE(SUM(estimated), 0) AS estimated, MAX(timestamp) AS last_used "
+           "FROM usage_events WHERE timestamp >= ? AND timestamp < ? AND key_id IS NOT NULL")
+    if user_id:
+        sql += " AND user_id = ?"
+        params.append(user_id)
+    rows = [dict(row) for row in conn.execute(sql, params)]
+    names = {row["id"]: dict(row) for row in conn.execute("SELECT id, name, prefix, user_id FROM api_keys")}
+    users = {row["id"]: row["username"] for row in conn.execute("SELECT id, username FROM users")}
+    out = []
+    for row in rows:
+        key = names.get(row["key_id"]) or {"name": "(deleted key)", "prefix": "", "user_id": None}
+        out.append({"key_id": row["key_id"], "name": key["name"], "prefix": key["prefix"],
+                    "user": users.get(key["user_id"]) or "", "requests": row["requests"],
+                    "tokens": row["tokens"], "estimated": int(row["estimated"]),
+                    "last_used": row["last_used"]})
+    return sorted(out, key=lambda row: row["tokens"], reverse=True)

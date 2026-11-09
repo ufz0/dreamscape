@@ -21,6 +21,9 @@ import config
 import db
 import settings
 
+# What a usage row can be. The admin Usage tab filters on these.
+SOURCES = ("chat", "dreaming", "api")
+
 
 def tz() -> ZoneInfo:
     return ZoneInfo(config.env("TIMEZONE", "Europe/Vienna"))
@@ -117,6 +120,15 @@ def format_k(value: int) -> str:
     return f"{text}M"
 
 
+def window_start(window: str, moment: datetime) -> datetime:
+    """The start of the current local day or week."""
+    if window == "daily":
+        return datetime.combine(local_day(moment.isoformat()), datetime.min.time(), tz())
+    if window == "weekly":
+        return datetime.combine(week_start(local_day(moment.isoformat())), datetime.min.time(), tz())
+    raise ValueError(f"unknown window: {window}")
+
+
 def window_tokens(conn, user_id, window: str, include_dreaming: bool = False,
                   only_estimated: bool = False, now: datetime | None = None) -> int:
     """Total tokens in the current local day or week for one user.
@@ -124,20 +136,27 @@ def window_tokens(conn, user_id, window: str, include_dreaming: bool = False,
     `now` defaults to the current time; tests pass a fixed instant to check the rollover.
     """
     moment = now or datetime.now(timezone.utc)
-    if window == "daily":
-        start = datetime.combine(local_day(moment.isoformat()), datetime.min.time(), tz())
-    elif window == "weekly":
-        start = datetime.combine(week_start(local_day(moment.isoformat())), datetime.min.time(), tz())
-    else:
-        raise ValueError(f"unknown window: {window}")
+    start = window_start(window, moment)
 
     sql = "SELECT COALESCE(SUM(total_tokens), 0) AS total FROM usage_events WHERE user_id = ? AND timestamp >= ?"
     params = [user_id, start.astimezone(timezone.utc).isoformat(timespec="seconds")]
     if not include_dreaming:
-        sql += " AND source = 'chat'"
+        # What counts toward a limit is what the user asked the app for: chat and API calls. The
+        # nightly job is counted only when the admin setting says so.
+        sql += " AND source IN ('chat', 'api')"
     if only_estimated:
         sql += " AND estimated = 1"
     return int(conn.execute(sql, params).fetchone()["total"])
+
+
+def window_by_source(conn, user_id, window: str, now: datetime | None = None) -> dict:
+    """The same window split by what produced it, which is what the usage view shows as a share."""
+    start = window_start(window, now or datetime.now(timezone.utc))
+    rows = conn.execute(
+        "SELECT source, COALESCE(SUM(total_tokens), 0) AS total FROM usage_events "
+        "WHERE user_id = ? AND timestamp >= ? GROUP BY source",
+        (user_id, start.astimezone(timezone.utc).isoformat(timespec="seconds"))).fetchall()
+    return {source: 0 for source in SOURCES} | {row["source"]: int(row["total"]) for row in rows}
 
 
 def reset_at(window: str, now: datetime | None = None) -> datetime:
@@ -211,6 +230,8 @@ def usage_state(conn, user: dict, now: datetime | None = None) -> dict:
             "limit": limit,
             "own": resolved["own"],
             "source": resolved["source"],
+            # Where the tokens in this window came from, so the view can show the API share.
+            "sources": window_by_source(conn, user["id"], window, now),
             "percent": round(used / limit * 100, 1) if limit else 0,
             "reached": reached,
             "resets_at": resets.astimezone(timezone.utc).isoformat(timespec="seconds"),
@@ -223,5 +244,5 @@ def usage_state(conn, user: dict, now: datetime | None = None) -> dict:
     note = ("Some of these numbers are estimates: the endpoint did not report usage for those calls, "
             "so they are character counts divided by four." if estimated_total else "")
     return {"windows": windows,
-            "counted_source": "chat and dreaming" if include_dreaming else "chat only",
+            "counted_source": ("chat, api and dreaming" if include_dreaming else "chat and api"),
             "note": note}
