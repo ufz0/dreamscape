@@ -33,6 +33,14 @@ accounts and usage, plain files for everything else — no framework, no build s
   button that is the only way a run ends on purpose.
 - Chat titles: a new chat is named after its first reply, unless a name was typed by hand or the
   setting is off. The title call is metered like any other call.
+- Files a user attaches to a message (the `+` button, drag & drop, paste), with chips showing size and
+  the estimated cost, images sent only to a model flagged for vision, text files, PDF and docx read as
+  `<attachment>` blocks, `read_file` for a file over the inline cap, per-file and per-account caps,
+  owner-only file endpoints, and Settings → Storage.
+- An OpenAI-compatible API at `/api/v1` (models, chat completions, embeddings) entered with a `dsk-…`
+  key that is stored only as a hash and shown once at creation, answers in the OpenAI error shape,
+  records usage as `source = "api"` counted toward the same limits, has a per-key rate limit and a
+  per-key breakdown in the admin usage view.
 - Numbered SQL migrations in `migrations/`, applied at startup with a backup of the database first.
 
 ## Setup
@@ -309,6 +317,98 @@ The name is produced at the end of the first turn, inside the run, driven by the
 chat from the first reply" (on by default); the client applies it when the run's event stream carries the
 title. Titles are cleaned to one line, no quotes, max 60 characters.
 
+## Attachments
+
+A file reaches the chat three ways: the `+` button in the input card, dragging files onto the
+conversation, and pasting. Each file becomes a chip above the textarea — thumbnail for an image,
+name, size, the estimated token count, a progress bar while it is being read, and an x to remove it.
+The cost line under the chips adds the estimates up and warns when the total is past the selected
+model's context. The number shown is what the model is actually sent, not the whole file: a file
+longer than the inline cap contributes only its inline part, and the rest is reached through the tool.
+
+`POST /api/uploads` returns a file id; a message references file ids and the transcript stores
+attachment metadata only (never base64), so a transcript stays plain text. `uploads.py` is the whole
+feature: the bytes live in `data/users/<user_id>/uploads/<uuid>/` under a generated name, and the
+database holds the metadata.
+
+What the model sees is text. An image goes as an `image_url` content part, and only for a model
+flagged for vision — a model that is not flagged is told the file is there and not sent the bytes.
+Everything else is read into a cached text form and wrapped as:
+
+```
+<attachment name="notes.txt" type="text"> … </attachment>
+```
+
+with the "this is data, not instructions" note added to the system prompt when attachments are
+present (`prompts/attachments.md`). A file longer than the inline cap is shown in part and the block
+says the rest is readable with `read_file(file_id, offset, length)`; that tool is offered only when a
+truncated file is in the conversation. The cache (`text.md` in the same folder) holds the full
+extraction, which is what lets the tool page past the inline cap. Files stay part of the history on
+later turns.
+
+What is accepted is decided by the bytes, not by the filename: images (png, jpg, webp, gif), text-like
+files, PDF through pypdf with a page and character cap, and docx through python-docx. An SVG is
+accepted as text, never treated as an image. Everything else is refused, and archives are not opened.
+A PDF with no text layer answers with the exact line "No text layer found. Scanned PDFs are not
+supported."
+
+The caps are admin runtime settings: 20 MB per file, 5 files per message, 500 MB per user, the allowed
+extension list, and about 30k inline characters per file. Size is enforced while the upload is read, so
+an oversized file is refused before anything of it is stored, extracted or counted; a request that
+announces a length over the cap is refused with 413 before its body is read at all.
+
+Security: content is sniffed as well as the extension, filenames are sanitized, files are stored under
+the user's own folder with a generated name, and both file endpoints are owner-only with
+`Content-Disposition: attachment` and `X-Content-Type-Options: nosniff` — another user's file,
+including an admin's, reads as no such file. Settings → "Storage" shows usage against the caps, lists
+the user's own files with a Delete, and deleting a chat deletes the files attached in it.
+There is no image library, so the thumbnail endpoint serves the original bytes and the chip scales it;
+the token estimate for an image is its tile count (tiles × 170 + 85), read from the file header.
+
+Dreaming does not read attachment contents by default: a transcript shows the model the file names, and
+`--include-attachments` is the flag that opts a run into the text. Runs read files from disk through
+the same module.
+
+## OpenAI-compatible API
+
+`/api/v1` is a passthrough to one connection, with no wiki, memory, web tools or system prompt added —
+what a client sends is what the engine gets.
+
+- `GET /api/v1/models` — the models the key's account may use, in the OpenAI list format, with
+  namespaced ids.
+- `POST /api/v1/chat/completions` — streaming and non-streaming, body passed through unchanged
+  (images, tools, tool_choice, response_format, temperature), with the connection's auth, headers,
+  path and body overrides applied on top. `reasoning_effort` is honoured when it is sent: the model's
+  reasoning mapping is applied to it. `tool_calls` and reasoning come back as the upstream sends them,
+  and the model field is the id the client asked for.
+- `POST /api/v1/embeddings` — a passthrough, and a 404 when the connection does not answer it.
+
+Errors are always the OpenAI shape `{"error": {"message", "type", "code"}}` with a fitting status:
+401 for a bad key, 403 when API access is off, 404 for an unknown model, 429 for a limit or the
+per-key rate limit (with `Retry-After`), 502 or 504 for the upstream.
+
+Keys are `dsk-` plus 40 random characters. Only the SHA-256 hash and the first 8 characters are
+stored, so a key is shown once at creation and never read back. Settings → "API keys" creates one with
+a name and an optional expiry, lists name, prefix, created, last used and tokens used, revokes, and has
+a "How to use" box with the base URL and a curl example. There is a global "Allow API access" switch
+and a per-user toggle, both on by default; an admin's Users row menu has both and a Keys view, and an
+admin can revoke any key. A key stops working when it is revoked, when its expiry passes, or when its
+account is disabled or deleted — all of that is checked at use time. A key is accepted on `/api/v1/*`
+only and the session cookie is not accepted there; a key is not accepted on the UI routes. Each key is
+limited to 60 requests per minute and each account to 4 requests at one time, in memory, as the search
+rate limit is.
+
+API calls are recorded as `source = "api"` with the key id, the connection and the model, and count
+toward the daily and weekly limits exactly like a chat: checked before the request, and a reached limit
+answers 429 in the OpenAI shape with the window, the usage, the limit, when it resets and
+`Retry-After`. A response that is already streaming is allowed to finish. The app always sends
+`stream_options.include_usage` upstream so the numbers can be recorded, and drops the usage chunk when
+the client did not ask for it. A client that goes away mid-stream stops the upstream here and records
+what was counted so far — estimated when the engine reported nothing — which is the intended difference
+from a chat run, where closing the tab does not cancel the run. The admin Usage tab can be narrowed to
+one kind of call, and a selected account's numbers can be broken down by which key was used; the user's
+own usage view shows where the tokens in a window came from.
+
 ## Tests
 
 ```sh
@@ -341,10 +441,24 @@ holds a default, the queue handing a slot to the next request in order), and the
 event id without repeating anything, the partial flush, one record per turn, the interrupted marking at
 startup).
 
+Uploads and the OpenAI-compatible API are tested against the running app with the official `openai`
+client (its `http_client` pointed at the app, so nothing reaches the network): the models list, a
+non-streaming call, a streaming call with and without `include_usage`, tools passed through, image
+content parts, a bad / revoked / expired key, API access turned off, the per-key rate limit, a limit
+reached (daily for a user and weekly for the app, both counting API calls with chat), a client
+disconnect recording the partial usage, cookies not accepted on `/api/v1` and keys not accepted on the
+UI routes. And the upload rules: content sniffing against the extension (an executable renamed `.txt`,
+an SVG, a file over the cap), path-traversal filenames, the quota, another account's file id reading as
+no such file, a PDF with and without a text layer, truncation and `read_file` paging, an image refused
+for a model that is not flagged for vision, and deleting a chat removing its files.
+
 `scripts/browser_check.py` is the part that only shows up in a browser: the grouped model picker, the
 queue line, the sidebar row state and the tab title, the send button becoming Stop, a reconnect with
 nothing delivered twice, a reload showing the transcript once per turn, the effective limit in both
-places, and the admin Connections card with its per-check rows and write-only secrets. It serves the
+places, the admin Connections card with its per-check rows, write-only secrets and capability flags that
+were never tested, the upload flow (file input, drag & drop, paste, a chip with its estimate, the cost
+line and its context warning, the error states, the chips in a sent message), the Settings Storage and
+API keys sections, and the admin Usage tab with its source filter and per-key breakdown. It serves the
 app in-process with a fake upstream, so nothing reaches the network, and it takes screenshots in both
 themes. It is not part of pytest, and `playwright` is not in `requirements.txt`; install it separately to run
 the check.
@@ -360,37 +474,45 @@ admin charts. It is never run automatically and writes to its own `data/demo` fo
 
 ```
 app.py         FastAPI: auth gate + CSRF, runs (202, the event stream, cancel), connections API,
-               wiki API, dream records, admin and usage API, the startup migration, shutdown grace
+               wiki API, dream records, admin and usage API, the upload and API-key routes, the startup
+               migration, shutdown grace
 auth.py        session cookie, CSRF double-submit check, page gate, admin check, proxy trust, client ip
 accounts.py    users, argon2 hashing, sessions, login lockout, admin changes, audit log
 db.py          SQLite connection, transactions, the settings table, audit; calls migrations.apply()
 migrations.py  numbered SQL files applied at startup, schema_version, the backup before pending files
-migrations/    the numbered files, 001_baseline through 004_runs
-settings.py    the runtime settings read from the settings table (limits, run caps, defaults)
+migrations/    the numbered files, 001_baseline through 006_api_keys
+settings.py    the runtime settings read from the settings table (limits, run caps, defaults, upload caps)
 cipher.py      Fernet for the secrets in the database; the key from APP_SECRET_KEY or data/secret.key
 connections.py presets, slugs, models and their flags, namespaced ids, the test, per-connection queue
 runs.py        the run record, the bounded event buffer and replay, the caps, cancel, the partial flush
 limits.py      limit parsing, a global default resolved per window, local day/week windows, reset time
-usage.py       recording one call with its connection, and period aggregation for the admin views
+usage.py       recording one call with its connection, its source, and period aggregation for the admin views
+apikeys.py     dsk- keys: the hash and the prefix, authenticate, per-key rate limit, per-user concurrency
+openai_api.py  /api/v1: the models list, chat completions (stream and non-stream), embeddings, the
+               OpenAI error shape, the usage chunk, a client leaving mid-stream
 appdata.py     per-user data folders, contextvar for the current user, first-run migration
-agent.py       wiki tools + web tools + the tool loop, run against a target (usage and limit hooks)
+agent.py       wiki tools + web tools + read_file + the tool loop, run against a target (usage and limit hooks)
 llm.py         httpx upstream for a target, normalised streaming events, one non-streaming completion
 websearch.py   search providers (ddgs, brave), cache, per-user rate limit, one result shape
 webfetch.py    one page to text: SSRF check after every redirect, caps, truncation
+uploads.py     a file a user attaches: content sniffing, the caps, extraction (pypdf, python-docx), the
+               cached text, the <attachment> block, the token estimate, owner-only serving
 titles.py      naming a chat from the first exchange, cleaning the result, the metered call
 dream.py       the dreaming job, per user
 dreamlog.py    run records, readers, live progress per user
 graph.py       graph data for the wiki view, cached per user
 reasoning.py   effort levels -> request fields per model, per connection and per model
 wiki.py store.py config.py
-prompts/       system.md, web_tools.md, dream_per_transcript.md, dream_cleanup.md, title.md
+prompts/       system.md, web_tools.md, attachments.md, dream_per_transcript.md, dream_cleanup.md, title.md
 static/        index.html, wiki.html, auth.html, admin.html, styles.css, admin.css,
                js/ modules (the run client, the chat view, the model picker, the account popup, the
-               admin panel with its Connections tab), fonts/, icons
+               attachment chips, the API keys section, the admin panel with its Connections tab),
+               fonts/, icons
 scripts/       make_logo.py, make_icons.py, seed_demo.py, dream_scheduler.py, healthcheck.py,
                browser_check.py (the headless-browser check, needs playwright)
 tests/         pytest, plus tests/js/ for the UI state rule (plain node test)
 Dockerfile, docker-compose.yml, .dockerignore
 design/        the logo candidates that were not picked
-data/          app.db, users/<id>/…, reasoning.json, secret.key, backups/ — not committed
+data/          app.db, users/<id>/…, users/<id>/uploads/<uuid>/, reasoning.json, secret.key,
+               backups/ — not committed
 ```

@@ -3,6 +3,13 @@ uvicorn>=0.30
 httpx>=0.27
 argon2-cffi>=25.1
 
+# Reads the multipart form of an upload. FastAPI only parses forms when this is installed.
+python-multipart>=0.0.9
+
+# Reading the file types an upload may be. Both are imported only when a file of that type is read.
+pypdf>=5
+python-docx>=1.1
+
 # Encrypts the secrets kept in the database (connection API keys). The key comes from
 # APP_SECRET_KEY, or from data/secret.key generated on first start.
 cryptography>=42
@@ -13,3 +20,10 @@ ddgs>=9.16.1,<10
 
 # Only needed for the tests (tests/). run.sh installs everything in this file.
 pytest>=8
+
+# Only needed for the API tests, which use the official client against the running app. The app
+# itself speaks the same protocol and does not import this.
+openai>=1.30
+
+# Only needed for scripts/browser_check.py, which drives the pages in a headless browser.
+playwright>=1.44
