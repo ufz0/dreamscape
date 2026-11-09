@@ -70,7 +70,8 @@ def public(row) -> dict:
         return None
     return {key: row[key] for key in
             ("id", "username", "role", "status", "created", "last_login", "must_change_password",
-             "daily_limit", "weekly_limit")} | {"must_change_password": bool(row["must_change_password"])}
+             "daily_limit", "weekly_limit", "api_access")} | {
+        "must_change_password": bool(row["must_change_password"]), "api_access": bool(row["api_access"])}
 
 
 # ---------- users ----------
@@ -187,6 +188,16 @@ def set_status(conn, actor: dict, user_id: int, status: str) -> dict:
     conn.execute("UPDATE users SET status = ? WHERE id = ?", (status, user_id))
     invalidate_sessions(conn, user_id)
     db.audit(conn, actor["username"], "status", user["username"], f"status={status}")
+    return get_user(conn, user_id)
+
+
+def set_api_access(conn, actor: dict, user_id: int, allowed: bool) -> dict:
+    """One account's API access. A key stops working the moment this is off, because it is checked per call."""
+    user = get_user(conn, user_id)
+    if user is None:
+        raise ValueError("No such user.")
+    conn.execute("UPDATE users SET api_access = ? WHERE id = ?", (1 if bool(allowed) else 0, user_id))
+    db.audit(conn, actor["username"], "api_access", user["username"], "on" if allowed else "off")
     return get_user(conn, user_id)
 
 
