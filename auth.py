@@ -115,6 +115,10 @@ def set_csrf_cookie(response, request: Request) -> str:
 def csrf_ok(request: Request) -> bool:
     if request.method in SAFE_METHODS:
         return True
+    # The OpenAI API is entered with a Bearer key, not a cookie, so there is no cookie for a
+    # cross-site request to carry and the double-submit check does not apply there.
+    if request.url.path.startswith("/api/v1/"):
+        return True
     token = request.cookies.get(CSRF_COOKIE)
     return bool(token) and request.headers.get("x-csrf-token") == token
 

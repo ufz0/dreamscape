@@ -5,6 +5,9 @@ State-changing requests also need the CSRF header. The current user is set for t
 data modules work inside that user's folder. The routes without a session are /healthz, /login,
 /setup while no accounts exist, /register when self-registration is on, and the static assets.
 
+One exception: /api/v1 is the OpenAI-compatible API and is entered with a Bearer key, not a cookie, so
+a cookie is not accepted there and a key is not accepted on the UI routes. See openai_api.py.
+
 The automatic /docs, /redoc and /openapi.json are turned off, because that would put the route map
 on a public address. /healthz stays open and says only whether the app can read its own data.
 """
@@ -19,6 +22,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Resp
 
 import accounts
 import agent
+import apikeys
 import appdata
 import auth
 import config
@@ -29,11 +33,13 @@ import dreamlog
 import graph
 import limits
 import migrations
+import openai_api
 import reasoning
 import runs
 import settings
 import store
 import titles
+import uploads
 import usage as usagelog
 import websearch
 import wiki
@@ -41,6 +47,12 @@ import wiki
 # No /docs, /redoc or /openapi.json: the app is reachable from the network, and a route map is not
 # something a health check or a login page needs.
 app = FastAPI(title="dreamscape", docs_url=None, redoc_url=None, openapi_url=None)
+
+# /api/v1 is the OpenAI-compatible API: a Bearer key, not a session cookie, and errors in the OpenAI
+# shape. It is a router of its own so its error format does not mix with the UI routes, which answer
+# {"detail": ...}.
+app.include_router(openai_api.router)
+app.exception_handler(openai_api.ApiError)(openai_api.handle)
 
 MEDIA = {"html": "text/html", "css": "text/css", "js": "text/javascript", "woff2": "font/woff2",
          "svg": "image/svg+xml", "png": "image/png", "ico": "image/x-icon",
@@ -396,6 +408,27 @@ async def admin_password(user_id: int, request: Request):
     return {"note": f"Password for {target['username']} changed. Show it once: {password}"}
 
 
+@app.post("/api/admin/users/{user_id}/api_access")
+async def admin_api_access(user_id: int, request: Request):
+    """One account's API access. Off means its keys stop working on the next call."""
+    admin = auth.require_admin(request)
+    body = await request.json()
+    with db.transaction() as conn:
+        try:
+            updated = accounts.set_api_access(conn, admin, user_id, bool(body.get("api_access")))
+        except ValueError as error:
+            raise HTTPException(400, str(error))
+    return {"user": updated}
+
+
+@app.get("/api/admin/keys")
+def admin_keys(request: Request):
+    """Every key, so the Users tab can revoke one it cannot see."""
+    auth.require_admin(request)
+    with db.transaction() as conn:
+        return {"keys": apikeys.list_all(conn), "allow_api": settings.flags(conn)["allow_api"]}
+
+
 @app.delete("/api/admin/users/{user_id}")
 async def admin_delete_user(user_id: int, request: Request):
     admin = auth.require_admin(request)
@@ -444,11 +477,17 @@ def admin_audit(request: Request):
 
 
 @app.get("/api/admin/usage")
-def admin_usage(request: Request, period: str = "month", date: str = ""):
-    """Usage numbers for admins. Only numbers: an admin cannot read another user's chat content."""
+def admin_usage(request: Request, period: str = "month", date: str = "", source: str = ""):
+    """Usage numbers for admins. Only numbers: an admin cannot read another user's chat content.
+
+    `source` narrows the numbers to one kind of call (chat, dreaming, api); empty is everything. The
+    per-key breakdown is part of the report whenever a key was used in the period.
+    """
     admin = auth.require_admin(request)
     if period not in ("day", "month", "year", "all"):
         raise HTTPException(400, "Period must be day, month, year or all.")
+    if source and source not in limits.SOURCES:
+        raise HTTPException(400, f"Source must be one of: {', '.join(limits.SOURCES)}.")
     target = None
     if date:
         try:
@@ -456,7 +495,9 @@ def admin_usage(request: Request, period: str = "month", date: str = ""):
         except ValueError:
             raise HTTPException(400, f"Date must be YYYY-MM-DD, not {date!r}.")
     with db.transaction() as conn:
-        report = usagelog.aggregate(conn, period, target)
+        report = usagelog.aggregate(conn, period, target, source=source or None)
+        report["source"] = source or ""
+        report["sources"] = list(limits.SOURCES)
         report["admins_cannot_read_content"] = "Admins can see usage numbers, not chat content."
         return report
 
@@ -592,18 +633,7 @@ def model_list(request: Request):
     """
     user = auth.require(request)
     with db.transaction() as conn:
-        groups = []
-        for connection in connections.list_connections(conn):
-            if not connection["enabled"]:
-                continue
-            if connection["visibility"] == "admins" and user["role"] != "admin":
-                continue
-            shown = [model for model in connection["models"] if not model["hidden"]]
-            if not shown:
-                continue
-            groups.append({"connection": {"id": connection["id"], "name": connection["name"],
-                                         "slug": connection["slug"], "label": connection["label"]},
-                           "models": shown})
+        groups = connections.visible(conn, user)
         return {"models": [model["namespaced"] for group in groups for model in group["models"]],
                 "groups": groups, "default": connections.default_model(conn),
                 "default_dream_model": connections.default_model(conn, "dream")}
@@ -678,9 +708,10 @@ def delete_conversation(cid: str, request: Request):
         raise HTTPException(404, "no such conversation")
     with db.transaction() as conn:
         cancelled = runs.cancel_for(conn, cid, "conversation")
+        removed = uploads.delete_for_conversation(conn, user["id"], cid)
     if not store.delete(cid):
         raise HTTPException(404, "no such conversation")
-    return {"ok": True, "cancelled_runs": cancelled}
+    return {"ok": True, "cancelled_runs": cancelled, "files_removed": removed}
 
 
 @app.get("/api/conversations/{cid}/messages")
@@ -711,6 +742,9 @@ def run_params(body: dict, model: str) -> dict:
         "reasoning_effort": body.get("reasoning_effort") or reasoning.settings().get("default_level", "medium"),
         "web": bool(body.get("web_search")),
         "generate_titles": bool(body.get("generate_titles")),
+        # File ids the message references. The run reads them from disk; the transcript stores only
+        # the metadata, so a run is not the place the bytes live.
+        "files": [str(item) for item in (body.get("files") or []) if str(item)],
     }
 
 
@@ -740,6 +774,13 @@ async def create_run(cid: str, request: Request):
 
         model = str(body.get("model") or row.get("model") or "")
         params = run_params(body, model)
+        per_message = settings.number(conn, "max_files_per_message")
+        if per_message and len(params["files"]) > per_message:
+            return JSONResponse({"detail": f"At most {per_message} files per message."}, status_code=400)
+        # A file id the sender does not own is not a file: another user's id reads as no such file.
+        for file_id in params["files"]:
+            if uploads.get_for(conn, user["id"], file_id) is None:
+                return JSONResponse({"detail": f"No such file: {file_id}. Upload it again."}, status_code=404)
         try:
             run = runs.create(conn, user, cid, params)
         except ValueError as error:
@@ -820,6 +861,156 @@ async def stream_run(run: runs.Run, after: int) -> AsyncIterator[str]:
             yield sse(record["payload"], record["id"])
     finally:
         run.unsubscribe(queue)
+
+
+# ---------- uploads ----------
+
+UPLOAD_CHUNK = 64 * 1024
+FORM_OVERHEAD = 4096   # the boundary lines and the small fields around the file in a multipart body
+
+
+def read_chunks(handle, limit: int):
+    """Read an upload piece by piece. The caller stops at the cap, so the rest of a file is never read.
+
+    The framework has already put the body somewhere readable by the time this runs, so the cap is met
+    part way through the file; a request whose declared length is over the cap is refused before its
+    body is read at all, which is the case a browser announces up front.
+    """
+    while True:
+        piece = handle.read(UPLOAD_CHUNK)
+        if not piece:
+            break
+        yield piece
+
+
+def attachment_headers(row: dict) -> dict:
+    """Both file endpoints say: this is the user's own file, served as a download, not sniffed."""
+    return {"Content-Disposition": f'attachment; filename="{uploads.clean_name(row["name"])}"',
+            "X-Content-Type-Options": "nosniff"}
+
+
+@app.post("/api/uploads")
+async def upload_file(request: Request):
+    """One file for the current user. The bytes go to that user's upload folder under a generated name;
+    the name in the form is what the chip shows, never a path.
+
+    The type is decided from the content, not from the filename. The size cap is checked while reading,
+    and the storage quota is checked before the file is kept.
+    """
+    user = auth.require(request)
+    per_file = settings.number(db.connect(), "max_upload_mb")
+    declared = int(request.headers.get("content-length") or 0)
+    if declared and declared > per_file * 1_000_000 + FORM_OVERHEAD:
+        # The length is announced before the body arrives, so this is refused without reading it.
+        raise HTTPException(413, uploads.too_large_message(per_file))
+
+    form = await request.form()
+    upload = form.get("file")
+    if not hasattr(upload, "file"):
+        raise HTTPException(400, "No file was sent.")
+    name = str(form.get("name") or upload.filename or "file")
+    conversation_id = str(form.get("conversation_id") or "") or None
+    with db.transaction() as conn:
+        try:
+            saved = uploads.create(conn, user, name, conversation_id,
+                                  read_chunks(upload.file, per_file * 1_000_000))
+        except uploads.UploadError as error:
+            raise HTTPException(error.status, error.message)
+    return {"file": saved}
+
+
+@app.get("/api/uploads")
+def list_uploads(request: Request):
+    """What the Storage section shows: the user's own files and how much space they take."""
+    user = auth.require(request)
+    with db.transaction() as conn:
+        return {"files": uploads.list_for(conn, user["id"]), "usage": uploads.summary(conn, user["id"])}
+
+
+@app.delete("/api/uploads/{file_id}")
+def delete_upload(file_id: str, request: Request):
+    user = auth.require(request)
+    with db.transaction() as conn:
+        if not uploads.delete(conn, user["id"], file_id):
+            raise HTTPException(404, "No such file.")
+    return {"ok": True}
+
+
+@app.get("/api/uploads/{file_id}/download")
+def download_upload(file_id: str, request: Request):
+    """The file itself, for the owner only. Another user's id, including an admin's, is no such file."""
+    user = auth.require(request)
+    with db.transaction() as conn:
+        row = uploads.get_for(conn, user["id"], file_id)
+    if row is None:
+        raise HTTPException(404, "No such file.")
+    path = uploads.file_path(row)
+    if not path.exists():
+        raise HTTPException(404, "That file is no longer on disk.")
+    return Response(path.read_bytes(), media_type=row["media_type"] or "application/octet-stream",
+                   headers=attachment_headers(row))
+
+
+@app.get("/api/uploads/{file_id}/thumbnail")
+def thumbnail_upload(file_id: str, request: Request):
+    """The same bytes for an image, for the owner only. Nothing here resizes: there is no image library,
+    so the chip scales the original."""
+    user = auth.require(request)
+    with db.transaction() as conn:
+        row = uploads.get_for(conn, user["id"], file_id)
+    if row is None:
+        raise HTTPException(404, "No such file.")
+    if row["kind"] != "image":
+        raise HTTPException(404, "That is not an image, so there is no thumbnail for it.")
+    path = uploads.file_path(row)
+    if not path.exists():
+        raise HTTPException(404, "That file is no longer on disk.")
+    return Response(path.read_bytes(), media_type=row["media_type"], headers=attachment_headers(row))
+
+
+# ---------- api keys ----------
+
+@app.get("/api/keys")
+def list_keys(request: Request):
+    user = auth.require(request)
+    with db.transaction() as conn:
+        return {"keys": apikeys.list_for(conn, user["id"]),
+                "base_url": base_url(request), "allow_api": settings.flags(conn)["allow_api"]}
+
+
+@app.post("/api/keys")
+async def create_key(request: Request):
+    """A key is shown once, here. What is stored is the hash and the first 8 characters."""
+    user = auth.require(request)
+    body = await request.json()
+    with db.transaction() as conn:
+        if not settings.flags(conn)["allow_api"]:
+            raise HTTPException(403, "API access is off for this app.")
+        try:
+            created, token = apikeys.create(conn, user, str(body.get("name") or ""), str(body.get("expires") or ""))
+        except ValueError as error:
+            raise HTTPException(400, str(error))
+    return {"key": created, "token": token, "note": "Copy it now: this is the only time it is shown."}
+
+
+@app.post("/api/keys/{key_id}/revoke")
+async def revoke_key(key_id: str, request: Request):
+    user = auth.require(request)
+    with db.transaction() as conn:
+        row = conn.execute("SELECT * FROM api_keys WHERE id = ?", (key_id,)).fetchone()
+        if row is None:
+            raise HTTPException(404, "No such key.")
+        if row["user_id"] != user["id"] and user["role"] != "admin":
+            raise HTTPException(403, "That key belongs to another account.")
+        apikeys.revoke(conn, key_id, user)
+    return {"ok": True}
+
+
+def base_url(request: Request) -> str:
+    """The base a client is told to use, from the address the request came to."""
+    scheme = auth.forwarded(request, "x-forwarded-proto") or (request.url.scheme or "http")
+    host = request.headers.get("host") or f"{config.HOST}:{config.PORT}"
+    return f"{scheme}://{host}/api/v1"
 
 
 # ---------- wiki ----------
