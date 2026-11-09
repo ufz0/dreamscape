@@ -1,4 +1,4 @@
-"""Per-user data folders: data/users/<user_id>/{transcripts,wiki,dream-runs}.
+"""Per-user data folders: data/users/<user_id>/{transcripts,wiki,dream-runs,uploads}.
 
 Every module that touches data reads the paths for the current user through current() instead of
 the fixed config paths. The current user is set by the request dependency in auth.py and by the
@@ -29,10 +29,14 @@ class Paths:
     wiki: Path
     runs: Path
     conversations: Path
+    # Files a user uploaded. Every file lives in its own folder named by its id, so a path can never
+    # come from a client filename.
+    uploads: Path = None
 
     def ensure(self) -> None:
-        for folder in (self.inbox, self.processed, self.wiki, self.runs):
-            folder.mkdir(parents=True, exist_ok=True)
+        for folder in (self.inbox, self.processed, self.wiki, self.runs, self.uploads):
+            if folder:
+                folder.mkdir(parents=True, exist_ok=True)
 
 
 def user_dir(user_id) -> Path:
@@ -42,7 +46,8 @@ def user_dir(user_id) -> Path:
 def paths_for(user_id) -> Paths:
     base = user_dir(user_id)
     return Paths(base=base, inbox=base / "transcripts" / "inbox", processed=base / "transcripts" / "processed",
-                 wiki=base / "wiki", runs=base / "dream-runs", conversations=base / "conversations.json")
+                 wiki=base / "wiki", runs=base / "dream-runs", conversations=base / "conversations.json",
+                 uploads=base / "uploads")
 
 
 def set_current(user_id) -> Paths:
@@ -62,7 +67,8 @@ def current() -> Paths:
 def legacy_paths() -> Paths:
     """The single-user layout, before per-user folders existed."""
     return Paths(base=config.DATA_DIR, inbox=config.INBOX, processed=config.PROCESSED, wiki=config.WIKI,
-                 runs=config.DATA_DIR / "dream-runs", conversations=config.DATA_DIR / "conversations.json")
+                 runs=config.DATA_DIR / "dream-runs", conversations=config.DATA_DIR / "conversations.json",
+                 uploads=config.DATA_DIR / "uploads")
 
 
 def has_legacy_data() -> bool:
