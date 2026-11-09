@@ -234,6 +234,28 @@ def resolve(conn, namespaced: str) -> dict | None:
     return {"connection": connection, "model": model}
 
 
+def visible(conn, user: dict) -> list[dict]:
+    """The connections and models this user may use, grouped.
+
+    A disabled connection is not usable at all; an admins-only connection and a hidden model are not
+    shown to a normal user. This is one function because the UI model list and the /api/v1 model list
+    answer the same question.
+    """
+    groups = []
+    for connection in list_connections(conn):
+        if not connection["enabled"]:
+            continue
+        if connection["visibility"] == "admins" and user["role"] != "admin":
+            continue
+        shown = [model for model in connection["models"] if not model["hidden"]]
+        if not shown:
+            continue
+        groups.append({"connection": {"id": connection["id"], "name": connection["name"],
+                                     "slug": connection["slug"], "label": connection["label"]},
+                       "models": shown})
+    return groups
+
+
 def default_model(conn, purpose: str = "chat") -> str:
     """The model the app falls back to: what the admin set, or the first model that is visible."""
     key = "default_dream_model" if purpose == "dream" else "default_chat_model"
