@@ -7,8 +7,10 @@ from typing import AsyncIterator
 
 import connections
 import config
+import db
 import llm
 import reasoning
+import uploads
 import usage
 import webfetch
 import websearch
@@ -72,8 +74,36 @@ WEB_TOOLS = [
 
 WEB_TOOL_NAMES = {tool["function"]["name"] for tool in WEB_TOOLS}
 
+# Offered only when a message actually attaches a file longer than the inline cap, so a turn that has
+# nothing to page through does not get a tool it cannot use.
+FILE_TOOLS = [
+    {"type": "function", "function": {
+        "name": "read_file",
+        "description": ("Read part of an attached file that is longer than what was shown in the message. "
+                        "offset and length count characters into the cached text."),
+        "parameters": {"type": "object", "properties": {
+            "file_id": {"type": "string", "description": "the attachment id named in the <attachment> block"},
+            "offset": {"type": "integer", "description": "character to start at, from 0"},
+            "length": {"type": "integer", "description": "characters to read, default 4000"},
+        }, "required": ["file_id"]}},
+    }
+]
 
-def system_prompt(system: str, inject_index: bool = True, effort_line: str = "", web: bool = False) -> str:
+FILE_TOOL_NAMES = {tool["function"]["name"] for tool in FILE_TOOLS}
+
+
+def tools_for(web: bool = False, files: bool = False) -> list[dict]:
+    """The tool list for one turn. The file tool is only there when a file needs paging."""
+    tools = list(TOOLS)
+    if web:
+        tools += WEB_TOOLS
+    if files:
+        tools += FILE_TOOLS
+    return tools
+
+
+def system_prompt(system: str, inject_index: bool = True, effort_line: str = "", web: bool = False,
+                  attachments: bool = False) -> str:
     """The system prompt for a turn. Lives here because the run engine builds turns too."""
     if inject_index:
         index = wiki.index_text()
@@ -84,6 +114,8 @@ def system_prompt(system: str, inject_index: bool = True, effort_line: str = "",
     # Only when the web tools are actually offered to this conversation.
     if web:
         base = f"{base}\n\n{config.read_prompt('web_tools.md')}"
+    if attachments:
+        base = f"{base}\n\n{config.read_prompt('attachments.md')}"
     return f"{base}\n\n{effort_line}" if effort_line else base
 
 
@@ -94,14 +126,20 @@ async def run_tool(name: str, arguments: dict, user_id=None) -> dict:
                                      arguments.get("recency"))
     if name == "web_fetch":
         return await webfetch.fetch(arguments.get("url"), arguments.get("max_chars"))
+    if name == "read_file":
+        with db.transaction() as conn:
+            return uploads.read_text(conn, user_id, arguments.get("file_id"),
+                                    arguments.get("offset", 0), arguments.get("length", 4000))
     return execute_tool(name, arguments)
 
 
 def tool_message(name: str, result: dict) -> str:
-    """What the model sees for a tool result. Web content is delimited, so it reads as data."""
+    """What the model sees for a tool result. Web and file content is delimited, so it reads as data."""
     text = json.dumps(result, ensure_ascii=False)
     if name in WEB_TOOL_NAMES:
         return f"<web_content>\n{text}\n</web_content>"
+    if name in FILE_TOOL_NAMES:
+        return f"<file_content>\n{text}\n</file_content>"
     return text
 
 

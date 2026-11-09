@@ -5,6 +5,7 @@ Run manually with `python dream.py`, or from cron at 03:00.
   --now      ignore the idle rule
   --user     run for one user only; without it every active user is processed in turn
   --trigger  what started the run: manual (default), cron, button. DREAM_TRIGGER does the same.
+  --include-attachments  read the attached files, not only their names
 
 Each run writes a structured record to that user's data/users/<id>/dream-runs/ (see dreamlog.py)
 and appends a short human-readable summary to the user's dream-log.md. Every upstream call is
@@ -30,6 +31,7 @@ import dreamlog
 import llm
 import reasoning
 import store
+import uploads
 import usage
 import wiki
 
@@ -65,8 +67,13 @@ def release_lock() -> None:
         LOCK_FILE.unlink()
 
 
-def render_transcript(path: Path, include_reasoning: bool = False) -> str:
-    """A transcript as text the model can read, tool calls and results included."""
+def render_transcript(path: Path, include_reasoning: bool = False, include_attachments: bool = False) -> str:
+    """A transcript as text the model can read, tool calls and results included.
+
+    Attachments are names only by default: a file is the user's material, and the nightly job has
+    enough to work with from what the conversation said about it. --include-attachments reads the
+    cached text for each one, which is what a wiki page about a document would need.
+    """
     lines = []
     for raw in path.read_text(encoding="utf-8").splitlines():
         if not raw.strip():
@@ -77,6 +84,16 @@ def render_transcript(path: Path, include_reasoning: bool = False) -> str:
             lines.append(f"{head} calls {call.get('name')}({json.dumps(call.get('arguments'), ensure_ascii=False)})")
         if record.get("content"):
             lines.append(f"{head}: {record['content']}")
+        attachments = record.get("attachments") or []
+        if attachments:
+            if include_attachments:
+                for item in attachments:
+                    text = uploads.text_for(item.get("id"))
+                    if text:
+                        lines.append(f"{head} attached {item.get('name')}: {text}")
+            else:
+                names = ", ".join(str(item.get("name") or item.get("id")) for item in attachments)
+                lines.append(f"{head} attached: {names}")
         # Thinking is kept out of the dreaming context unless asked for: it is the model's own
         # reasoning about the same facts we are already reading.
         if include_reasoning and record.get("reasoning"):
@@ -214,7 +231,7 @@ def record_tool_step(record: dict, target: list, event: dict, snapshot: dict, gr
 
 
 async def run_user(user: dict, trigger: str = "", dry_run: bool = False, force: bool = False,
-                   include_reasoning: bool = False) -> dict:
+                   include_reasoning: bool = False, include_attachments: bool = False) -> dict:
     """One dreaming run for one user. Called from run(), which sets the current user."""
     paths = appdata.current()
     paths.ensure()
@@ -277,7 +294,8 @@ async def run_user(user: dict, trigger: str = "", dry_run: bool = False, force: 
                            "position": len(record["transcripts"]), "total": len(files), "phase": path.name},
                           str(user["id"]))
             prompt = config.read_prompt("dream_per_transcript.md", index=wiki.index_text(),
-                                       source=path.name, transcript=render_transcript(path, include_reasoning))
+                                       source=path.name,
+                                       transcript=render_transcript(path, include_reasoning, include_attachments))
             for attempt in range(1, RETRIES + 2):
                 item["attempts"] = attempt
                 try:
@@ -384,7 +402,8 @@ async def run_user(user: dict, trigger: str = "", dry_run: bool = False, force: 
 
 
 async def run(trigger: str = "", dry_run: bool = False, force: bool = False,
-             include_reasoning: bool = False, user: dict | None = None) -> dict:
+             include_reasoning: bool = False, include_attachments: bool = False,
+             user: dict | None = None) -> dict:
     """Dream for one user when given, otherwise for every active user in turn.
 
     One process, one lockfile: the whole batch holds the lock, so the cron job and the UI button
@@ -402,7 +421,7 @@ async def run(trigger: str = "", dry_run: bool = False, force: bool = False,
     try:
         for entry in users:
             appdata.set_current(entry["id"])
-            records.append(await run_user(entry, trigger, dry_run, force, include_reasoning))
+            records.append(await run_user(entry, trigger, dry_run, force, include_reasoning, include_attachments))
     finally:
         release_lock()
     if user:
@@ -419,6 +438,8 @@ def main() -> int:
     parser.add_argument("--user", default="", help="run for this username only")
     parser.add_argument("--include-reasoning", action="store_true",
                         help="pass thinking to the model as well (off by default)")
+    parser.add_argument("--include-attachments", action="store_true",
+                        help="read the attached files as well; by default only their names are used")
     parser.add_argument("--trigger", default="", help="what started the run: manual, cron, button")
     args = parser.parse_args()
 
@@ -432,7 +453,8 @@ def main() -> int:
 
     try:
         result = asyncio.run(run(trigger=args.trigger, dry_run=args.dry_run, force=args.now,
-                                 include_reasoning=args.include_reasoning, user=user))
+                                 include_reasoning=args.include_reasoning,
+                                 include_attachments=args.include_attachments, user=user))
     except Locked as error:
         print(f"dream: {error}")
         return 1

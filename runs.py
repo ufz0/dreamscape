@@ -35,6 +35,7 @@ import reasoning
 import settings
 import store
 import titles
+import uploads
 import usage as usagelog
 
 ACTIVE = ("queued", "running", "waiting_approval")
@@ -354,16 +355,39 @@ async def execute(run: Run) -> dict:
             run.set_status("failed", blocked["message"])
             return run.status_row()
 
+        files = [str(item) for item in (params.get("files") or [])]
+        attachments = []
+        with db.transaction() as conn:
+            # The file may have been uploaded before this conversation existed, so the chat it belongs
+            # to is recorded here: deleting the chat is what removes the file.
+            for file_id in files:
+                conn.execute("UPDATE uploads SET conversation_id = ? WHERE id = ? AND user_id = ?",
+                             (run.conversation_id, file_id, run.user_id))
+            attachments = uploads.metadata(conn, run.user_id, files)
+
         if not params.get("regenerate"):
             store.append(run.conversation_id, {"role": "user", "content": params.get("message") or "",
-                                               "run": run.id})
-        run.emit({"type": "user_message", "content": params.get("message") or "", "run": run.id})
+                                               "attachments": attachments, "run": run.id})
+        run.emit({"type": "user_message", "content": params.get("message") or "",
+                  "attachments": attachments, "run": run.id})
 
         mapping = reasoning.resolve(model, params.get("reasoning_effort") or "medium", connection_map)
         run.level = mapping["level"]
         body = connections.request_body(resolved, mapping.get("body")) if resolved else dict(mapping.get("body") or {})
         mapping = {**mapping, "body": body}
-        tools = agent.TOOLS + agent.WEB_TOOLS if params.get("web") else agent.TOOLS
+
+        with db.transaction() as conn:
+            vision = bool(resolved and resolved["model"].get("supports_vision"))
+            stored = store.messages(run.conversation_id)
+            history = [uploads.model_message(conn, run.user_id, message, vision) for message in stored]
+
+        # `model_message` turns the metadata into what the model sees, so these are read from the stored
+        # records: whether any file is in this conversation, and whether one of them is longer than the
+        # inline cap (which is the only case where read_file has something to page through).
+        has_files = any(message.get("attachments") for message in stored)
+        needs_reader = any(item.get("truncated") for message in stored
+                           for item in message.get("attachments") or [])
+        tools = agent.tools_for(bool(params.get("web")), needs_reader)
 
         step = {"content": "", "reasoning": "", "tool_calls": [], "started": time.monotonic()}
         turn_position = store.file_end(run.conversation_id)
@@ -389,7 +413,7 @@ async def execute(run: Run) -> dict:
         async for event in agent.run_loop(
                 [{"role": "system", "content": agent.system_prompt(
                     params.get("system") or "", bool(params.get("wiki_index", True)),
-                    mapping.get("system") or "", bool(params.get("web")))}] + store.messages(run.conversation_id),
+                    mapping.get("system") or "", bool(params.get("web")), has_files)}] + history,
                 model, float(params.get("temperature", 0.7)), mapping=mapping,
                 on_usage=lambda block, estimated: record_usage(run, user, block, estimated),
                 limit_check=lambda: limit_check(run, user), tools=tools, user_id=run.user_id,

@@ -128,6 +128,10 @@ def messages(cid: str) -> list[dict]:
 
     The reasoning field is deliberately left out: thinking is stored for the record and the UI,
     but it is not part of what the model sees in later turns.
+
+    A user record's `attachments` are attachment metadata only (id, name, kind, size), never the file
+    content, so this carries the ids through and runs.py turns them into the content parts. That is
+    what keeps an image or a long file part of the history on later turns.
     """
     row = get(cid)
     if row is None:
@@ -149,6 +153,8 @@ def messages(cid: str) -> list[dict]:
             message["tool_call_id"] = record["tool_call_id"]
         if record.get("name"):
             message["name"] = record["name"]
+        if record.get("attachments"):
+            message["attachments"] = record["attachments"]
         if "content" not in message and "tool_calls" not in message:
             continue
         out.append(message)
